@@ -314,6 +314,7 @@ def mapping_list(request):
 
 @api_view(["GET", "POST"])
 @permission_classes([IsAuthenticated])
+@csrf_exempt
 def add_mapping(request):
     from stock.models import TyreItem
     from cycletube.models import CycleTubeItem
@@ -350,6 +351,7 @@ def add_mapping(request):
 
 @api_view(["DELETE", "POST"])
 @permission_classes([IsAuthenticated])
+@csrf_exempt
 def delete_mapping(request, pk):
     mapping = TallyItemMapping.objects.filter(pk=pk).first()
     if mapping:
@@ -359,6 +361,7 @@ def delete_mapping(request, pk):
 
 @api_view(["PATCH", "POST", "PUT"])
 @permission_classes([IsAuthenticated])
+@csrf_exempt
 def update_mapping(request, pk):
     mapping = get_object_or_404(TallyItemMapping, pk=pk)
     module = str(request.data.get("module", "")).strip()
@@ -421,6 +424,7 @@ def sync_log(request):
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
+@csrf_exempt
 def retry_pending_now(request):
     count = retry_pending_items()
     return Response({"resolved_count": count, "message": f"{count} pending item(s) resolved."})
@@ -428,6 +432,7 @@ def retry_pending_now(request):
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
+@csrf_exempt
 def retry_single_pending(request, pk):
     pending = TallyPendingItem.objects.filter(pk=pk).first()
     if not pending or pending.resolved:
@@ -457,6 +462,7 @@ def retry_single_pending(request, pk):
 
 @api_view(["POST", "DELETE"])
 @permission_classes([IsAuthenticated])
+@csrf_exempt
 def delete_pending_item(request, pk):
     try:
         pending = TallyPendingItem.objects.filter(pk=pk).first()
@@ -492,6 +498,7 @@ def delete_pending_item(request, pk):
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
+@csrf_exempt
 def map_pending_item(request, pk):
     """Inline map & sync from pending items list."""
     pending = TallyPendingItem.objects.filter(pk=pk).first()
