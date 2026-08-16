@@ -313,7 +313,7 @@ def mapping_list(request):
 
 
 @api_view(["GET", "POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 @csrf_exempt
 def add_mapping(request):
     from stock.models import TyreItem
@@ -350,7 +350,7 @@ def add_mapping(request):
 
 
 @api_view(["DELETE", "POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 @csrf_exempt
 def delete_mapping(request, pk):
     mapping = TallyItemMapping.objects.filter(pk=pk).first()
@@ -360,7 +360,7 @@ def delete_mapping(request, pk):
 
 
 @api_view(["PATCH", "POST", "PUT"])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 @csrf_exempt
 def update_mapping(request, pk):
     mapping = get_object_or_404(TallyItemMapping, pk=pk)
@@ -390,7 +390,7 @@ def update_mapping(request, pk):
 # ============================================================
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 def sync_log(request):
     try:
         page = int(request.query_params.get("page", 1))
@@ -423,7 +423,7 @@ def sync_log(request):
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 @csrf_exempt
 def retry_pending_now(request):
     count = retry_pending_items()
@@ -431,7 +431,7 @@ def retry_pending_now(request):
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 @csrf_exempt
 def retry_single_pending(request, pk):
     pending = TallyPendingItem.objects.filter(pk=pk).first()
@@ -461,7 +461,7 @@ def retry_single_pending(request, pk):
 
 
 @api_view(["POST", "DELETE"])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 @csrf_exempt
 def delete_pending_item(request, pk):
     try:
@@ -497,7 +497,7 @@ def delete_pending_item(request, pk):
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 @csrf_exempt
 def map_pending_item(request, pk):
     """Inline map & sync from pending items list."""
