@@ -15,3 +15,5 @@ block-device.json
 *.sh
 .vscode/
 .idea/
+
+# Trigger CI/CD run
