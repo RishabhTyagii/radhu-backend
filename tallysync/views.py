@@ -211,8 +211,10 @@ def tally_webhook(request):
 # REST API — Sales Summary (Invoices list)
 # ============================================================
 
+@csrf_exempt
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@authentication_classes([])
+@permission_classes([AllowAny])
 def sales_summary(request):
     today = datetime.date.today()
     month_str = request.query_params.get("month", "")
@@ -285,8 +287,10 @@ def sales_summary(request):
 # Invoice Detail
 # ============================================================
 
+@csrf_exempt
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@authentication_classes([])
+@permission_classes([AllowAny])
 def invoice_detail(request, pk):
     invoice = get_object_or_404(TallyInvoice, pk=pk)
     data = TallyInvoiceSerializer(invoice).data
@@ -299,8 +303,10 @@ def invoice_detail(request, pk):
 # Item Mapping CRUD
 # ============================================================
 
+@csrf_exempt
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@authentication_classes([])
+@permission_classes([AllowAny])
 def mapping_list(request):
     mappings = TallyItemMapping.objects.all()
     rows = []
@@ -570,8 +576,10 @@ def map_pending_item(request, pk):
 # All items list (for mapping dropdowns)
 # ============================================================
 
+@csrf_exempt
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@authentication_classes([])
+@permission_classes([AllowAny])
 def all_stock_items(request):
     from stock.models import TyreItem
     from cycletube.models import CycleTubeItem
