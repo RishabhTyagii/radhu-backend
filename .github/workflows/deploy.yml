@@ -18,10 +18,9 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
             cd /var/www/radhu-backend
-            # Safe reset and pull
             git fetch --all
             git reset --hard origin/main
-            source venv/bin/activate
+            source /var/www/radhu-venv/bin/activate
             pip install -r requirements.txt
             python manage.py migrate
             python manage.py collectstatic --noinput
