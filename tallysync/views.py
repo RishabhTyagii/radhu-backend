@@ -348,12 +348,13 @@ def add_mapping(request):
     }, status=status.HTTP_201_CREATED)
 
 
-@api_view(["DELETE"])
+@api_view(["DELETE", "POST"])
 @permission_classes([IsAuthenticated])
 def delete_mapping(request, pk):
-    mapping = get_object_or_404(TallyItemMapping, pk=pk)
-    mapping.delete()
-    return Response({"ok": True})
+    mapping = TallyItemMapping.objects.filter(pk=pk).first()
+    if mapping:
+        mapping.delete()
+    return Response({"ok": True, "message": "Mapping deleted successfully."})
 
 
 @api_view(["PATCH", "POST", "PUT"])
@@ -428,9 +429,9 @@ def retry_pending_now(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def retry_single_pending(request, pk):
-    pending = get_object_or_404(TallyPendingItem, pk=pk)
-    if pending.resolved:
-        return Response({"ok": True, "message": "Already resolved."})
+    pending = TallyPendingItem.objects.filter(pk=pk).first()
+    if not pending or pending.resolved:
+        return Response({"ok": True, "message": "Already resolved or removed."})
 
     mapping = TallyItemMapping.objects.filter(tally_item_name__iexact=pending.tally_item_name).first()
     if not mapping:
@@ -445,9 +446,10 @@ def retry_single_pending(request, pk):
         pending.resolved = True
         pending.resolved_at = timezone.now()
         pending.save(update_fields=["resolved", "resolved_at"])
-        TallySyncLog.objects.create(invoice=pending.invoice, level="info",
-            message=f"Manual retry resolved: '{pending.tally_item_name}' x{pending.qty}.")
-        _maybe_mark_invoice_synced(pending.invoice)
+        if pending.invoice:
+            TallySyncLog.objects.create(invoice=pending.invoice, level="info",
+                message=f"Manual retry resolved: '{pending.tally_item_name}' x{pending.qty}.")
+            _maybe_mark_invoice_synced(pending.invoice)
         return Response({"ok": True, "message": f"Resolved: {pending.tally_item_name} x{pending.qty}"})
     else:
         return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
@@ -456,38 +458,45 @@ def retry_single_pending(request, pk):
 @api_view(["POST", "DELETE"])
 @permission_classes([IsAuthenticated])
 def delete_pending_item(request, pk):
-    pending = get_object_or_404(TallyPendingItem, pk=pk)
-    delete_mode = str(request.data.get("mode", request.query_params.get("mode", "mapping_only"))).strip()
+    try:
+        pending = TallyPendingItem.objects.filter(pk=pk).first()
+        if not pending:
+            return Response({"ok": True, "message": "Pending item already removed."})
 
-    invoice = pending.invoice
+        delete_mode = str(request.data.get("mode", request.query_params.get("mode", "mapping_only"))).strip()
+        invoice = pending.invoice
 
-    if delete_mode == "full":
-        # Full Delete: Remove pending item AND revert invoice totals & stock
-        TallySyncLog.objects.create(
-            invoice=invoice,
-            level="warning",
-            message=f"FULL DELETE: Item '{pending.tally_item_name}' (Qty: {pending.qty}) completely removed from invoice {pending.voucher_number}."
-        )
-        pending.delete()
-        _maybe_mark_invoice_synced(invoice)
-        return Response({"ok": True, "message": f"Full delete complete for '{pending.tally_item_name}'."})
-    else:
-        # Mapping Only: Remove pending item from list only
-        TallySyncLog.objects.create(
-            invoice=invoice,
-            level="info",
-            message=f"Sync entry '{pending.tally_item_name}' removed from pending list."
-        )
-        pending.delete()
-        _maybe_mark_invoice_synced(invoice)
-        return Response({"ok": True, "message": f"Pending item '{pending.tally_item_name}' removed from pending list."})
+        if invoice and delete_mode == "full":
+            TallySyncLog.objects.create(
+                invoice=invoice,
+                level="warning",
+                message=f"FULL DELETE: Item '{pending.tally_item_name}' (Qty: {pending.qty}) completely removed from invoice {pending.voucher_number}."
+            )
+            pending.delete()
+            _maybe_mark_invoice_synced(invoice)
+            return Response({"ok": True, "message": f"Full delete complete for '{pending.tally_item_name}'."})
+        else:
+            if invoice:
+                TallySyncLog.objects.create(
+                    invoice=invoice,
+                    level="info",
+                    message=f"Sync entry '{pending.tally_item_name}' removed from pending list."
+                )
+            pending.delete()
+            if invoice:
+                _maybe_mark_invoice_synced(invoice)
+            return Response({"ok": True, "message": f"Pending item '{pending.tally_item_name}' removed from pending list."})
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def map_pending_item(request, pk):
     """Inline map & sync from pending items list."""
-    pending = get_object_or_404(TallyPendingItem, pk=pk)
+    pending = TallyPendingItem.objects.filter(pk=pk).first()
+    if not pending:
+        return Response({"ok": True, "message": "Pending item already resolved or removed."})
 
     module = str(request.data.get("module", "")).strip()
     item_id = request.data.get("item_id")
@@ -520,9 +529,10 @@ def map_pending_item(request, pk):
             pending.resolved = True
             pending.resolved_at = timezone.now()
             pending.save(update_fields=["resolved", "resolved_at"])
-            TallySyncLog.objects.create(invoice=pending.invoice, level="info",
-                message=f"1-Time Sync: '{pending.tally_item_name}' x{pending.qty} mapped to {target_item}. No permanent mapping.")
-            _maybe_mark_invoice_synced(pending.invoice)
+            if pending.invoice:
+                TallySyncLog.objects.create(invoice=pending.invoice, level="info",
+                    message=f"1-Time Sync: '{pending.tally_item_name}' x{pending.qty} mapped to {target_item}.")
+                _maybe_mark_invoice_synced(pending.invoice)
             return Response({"ok": True, "message": f"One-time resolved: {pending.tally_item_name} x{pending.qty}"})
         else:
             return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
@@ -537,6 +547,7 @@ def map_pending_item(request, pk):
             "message": f"Permanent mapping saved. {resolved} pending item(s) resolved.",
             "resolved_count": resolved,
         })
+
 
 
 # ============================================================
