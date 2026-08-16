@@ -453,6 +453,36 @@ def retry_single_pending(request, pk):
         return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
 
 
+@api_view(["POST", "DELETE"])
+@permission_classes([IsAuthenticated])
+def delete_pending_item(request, pk):
+    pending = get_object_or_404(TallyPendingItem, pk=pk)
+    delete_mode = str(request.data.get("mode", request.query_params.get("mode", "mapping_only"))).strip()
+
+    invoice = pending.invoice
+
+    if delete_mode == "full":
+        # Full Delete: Remove pending item AND revert invoice totals & stock
+        TallySyncLog.objects.create(
+            invoice=invoice,
+            level="warning",
+            message=f"FULL DELETE: Item '{pending.tally_item_name}' (Qty: {pending.qty}) completely removed from invoice {pending.voucher_number}."
+        )
+        pending.delete()
+        _maybe_mark_invoice_synced(invoice)
+        return Response({"ok": True, "message": f"Full delete complete for '{pending.tally_item_name}'."})
+    else:
+        # Mapping Only: Remove pending item from list only
+        TallySyncLog.objects.create(
+            invoice=invoice,
+            level="info",
+            message=f"Sync entry '{pending.tally_item_name}' removed from pending list."
+        )
+        pending.delete()
+        _maybe_mark_invoice_synced(invoice)
+        return Response({"ok": True, "message": f"Pending item '{pending.tally_item_name}' removed from pending list."})
+
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def map_pending_item(request, pk):

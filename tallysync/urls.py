@@ -13,5 +13,6 @@ urlpatterns = [
     path("retry-pending/", views.retry_pending_now, name="tally_retry_pending"),
     path("pending/<int:pk>/retry/", views.retry_single_pending, name="tally_retry_single_pending"),
     path("pending/<int:pk>/map/", views.map_pending_item, name="tally_map_pending_item"),
+    path("pending/<int:pk>/delete/", views.delete_pending_item, name="tally_delete_pending_item"),
     path("stock-items/", views.all_stock_items, name="tally_stock_items"),
 ]
