@@ -600,9 +600,9 @@ def all_stock_items(request):
     from cycletube.models import CycleTubeItem
     from cycletyres.models import CycleTyreItem
 
-    tyre_items = [{"id": t.id, "label": str(t), "module": "tyre"} for t in TyreItem.objects.filter(is_active=True)]
-    tube_items = [{"id": t.id, "label": str(t), "module": "tube"} for t in CycleTubeItem.objects.filter(is_active=True)]
-    cycletyre_items = [{"id": t.id, "label": str(t), "module": "cycletyre"} for t in CycleTyreItem.objects.filter(is_active=True)]
+    tyre_items = [{"id": t.id, "label": str(t), "module": "tyre"} for t in TyreItem.objects.all()]
+    tube_items = [{"id": t.id, "label": str(t), "module": "tube"} for t in CycleTubeItem.objects.all()]
+    cycletyre_items = [{"id": t.id, "label": str(t), "module": "cycletyre"} for t in CycleTyreItem.objects.all()]
 
     return Response({
         "items": tyre_items + tube_items + cycletyre_items,
