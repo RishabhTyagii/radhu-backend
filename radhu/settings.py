@@ -122,9 +122,20 @@ REST_FRAMEWORK = {
     ],
 }
 
-SESSION_COOKIE_SAMESITE = 'Lax'
-CSRF_COOKIE_SAMESITE = 'Lax'
-CSRF_COOKIE_HTTPONLY = False  # Allow JS to read csrftoken cookie
-CSRF_TRUSTED_ORIGINS = ['http://localhost:3000', 'http://127.0.0.1:3000']
+SESSION_COOKIE_SAMESITE = 'None'
+SESSION_COOKIE_SECURE = True
+CSRF_COOKIE_SAMESITE = 'None'
+CSRF_COOKIE_SECURE = True
+CSRF_COOKIE_HTTPONLY = False
+CSRF_TRUSTED_ORIGINS = [
+    'http://3.7.243.183',
+    'https://3.7.243.183',
+    'http://radhuerp.site',
+    'https://radhuerp.site',
+    'http://*.radhuerp.site',
+    'https://*.radhuerp.site',
+    'http://localhost:3000',
+    'https://*.vercel.app',
+]
 
 TALLY_SYNC_API_KEY = 'fc2e1029465c118d144c93a093c0efd2cfa2d40a258c32c8'
