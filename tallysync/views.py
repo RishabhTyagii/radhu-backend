@@ -356,6 +356,31 @@ def delete_mapping(request, pk):
     return Response({"ok": True})
 
 
+@api_view(["PATCH", "POST", "PUT"])
+@permission_classes([IsAuthenticated])
+def update_mapping(request, pk):
+    mapping = get_object_or_404(TallyItemMapping, pk=pk)
+    module = str(request.data.get("module", "")).strip()
+    item_id = request.data.get("item_id")
+
+    if module:
+        mapping.module = module
+    if item_id is not None:
+        mapping.item_id = int(item_id)
+    mapping.save()
+
+    resolved = retry_pending_items(tally_item_name=mapping.tally_item_name)
+    item = mapping.get_item()
+    data = TallyItemMappingSerializer(mapping).data
+    data["resolved_item_label"] = str(item) if item else f"(deleted #{mapping.item_id})"
+
+    return Response({
+        "ok": True,
+        "mapping": data,
+        "resolved_count": resolved,
+    })
+
+
 # ============================================================
 # Sync Logs & Pending Items
 # ============================================================
@@ -363,10 +388,31 @@ def delete_mapping(request, pk):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def sync_log(request):
-    logs = TallySyncLog.objects.select_related("invoice")[:100]
+    try:
+        page = int(request.query_params.get("page", 1))
+        page_size = int(request.query_params.get("page_size", 15))
+    except ValueError:
+        page = 1
+        page_size = 15
+
+    logs_qs = TallySyncLog.objects.select_related("invoice")
+    total_logs = logs_qs.count()
+
+    start = (page - 1) * page_size
+    end = start + page_size
+
+    logs = logs_qs[start:end]
     pending = TallyPendingItem.objects.filter(resolved=False).select_related("invoice")
+
+    import math
+    total_pages = math.ceil(total_logs / page_size) if total_logs > 0 else 1
+
     return Response({
         "logs": TallySyncLogSerializer(logs, many=True).data,
+        "total_logs": total_logs,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
         "pending": TallyPendingItemSerializer(pending, many=True).data,
         "pending_total": pending.count(),
     })
