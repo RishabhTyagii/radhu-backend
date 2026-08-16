@@ -1,7 +1,8 @@
 from django.contrib.auth import authenticate, login as django_login, logout as django_logout
 from django.contrib.auth.models import User
 from django.shortcuts import get_object_or_404
-from rest_framework.decorators import api_view, permission_classes
+from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
+from rest_framework.decorators import api_view, permission_classes, authentication_classes
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework import status
@@ -10,8 +11,17 @@ from .models import UserProfile, PAGES_MAP
 from .serializers import UserSerializer
 
 
-@api_view(['POST'])
+@api_view(['GET'])
 @permission_classes([AllowAny])
+@ensure_csrf_cookie
+def csrf_token_view(request):
+    return Response({'ok': True})
+
+
+@api_view(['POST'])
+@authentication_classes([])
+@permission_classes([AllowAny])
+@csrf_exempt
 def login_view(request):
     username = request.data.get('username', '').strip()
     password = request.data.get('password', '')
