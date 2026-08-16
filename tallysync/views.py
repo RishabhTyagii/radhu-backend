@@ -474,6 +474,21 @@ def retry_single_pending(request, pk):
 
 
 @csrf_exempt
+@api_view(["POST", "PATCH"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def update_pending_category(request, pk):
+    pending = TallyPendingItem.objects.filter(pk=pk).first()
+    if not pending:
+        return Response({"error": "Pending item not found."}, status=status.HTTP_404_NOT_FOUND)
+    category = str(request.data.get("category", "")).strip()
+    if category:
+        pending.category_override = category
+        pending.save(update_fields=["category_override"])
+    return Response({"ok": True, "category": pending.category_override})
+
+
+@csrf_exempt
 @api_view(["POST", "DELETE"])
 @authentication_classes([])
 @permission_classes([AllowAny])

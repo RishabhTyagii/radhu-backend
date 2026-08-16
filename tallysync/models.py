@@ -103,6 +103,7 @@ class TallyPendingItem(models.Model):
     party_name = models.CharField(max_length=200, blank=True)
     reason = models.CharField(max_length=25, choices=PENDING_REASON_CHOICES)
     resolved = models.BooleanField(default=False)
+    category_override = models.CharField(max_length=20, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     resolved_at = models.DateTimeField(null=True, blank=True)
 
