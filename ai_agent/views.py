@@ -22,6 +22,7 @@ from rest_framework.response import Response
 MAX_FILE_BYTES = 8 * 1024 * 1024
 CONTEXT_TTL_SECONDS = 60
 _CHAT_SESSIONS = {}
+_LAST_UPLOADED_TABLE = {}  # session_key -> {"table": table, "name": name, "time": timestamp}
 _CONTEXT_CACHE = {"built_at": 0, "text": ""}
 
 
@@ -486,7 +487,11 @@ RULES:
 - Match the user's language (Hindi, English, or Hinglish).
 - Be concise and practical. Use Indian number style (₹, lakhs, crores).
 - For low stock, pending/overdue orders, and this-month billing, give a short actionable summary.
-- If a file is uploaded (Excel/CSV/image), analyse it. If the user wants those rows added to ERP, propose import_items or import_production (max 80 rows). Never set clear_existing.
+- If a file is uploaded (Excel/CSV/image), analyse it. When the user wants to add/import items from the uploaded file, simply output:
+```radhu_action
+{{"actions":[{{"action":"import_items","module":"auto_tyre"}}]}}
+```
+(The backend will automatically parse all rows and columns like tyre, pattern, type, weight, opening_stock from the sheet).
 - You CAN propose ERP write actions. The user must confirm in the UI before anything is saved.
 - When the user wants to add/delete/import/production/sale/dispatch/adjust, end your reply with ONE fenced block:
 
@@ -654,6 +659,7 @@ def ai_agent_chat(request):
 
     if reset:
         _CHAT_SESSIONS.pop(session_key, None)
+        _LAST_UPLOADED_TABLE.pop(session_key, None)
         return Response({
             "reply": "Chat history cleared. Kaise help kar sakta hoon?",
             "session_id": session_key,
@@ -666,6 +672,21 @@ def ai_agent_chat(request):
         extra_parts, file_note, table = ([], "", None)
         if uploaded_file:
             extra_parts, file_note, table = _parse_upload(uploaded_file)
+            if table:
+                _LAST_UPLOADED_TABLE[session_key] = {
+                    "table": table,
+                    "name": uploaded_file.name,
+                    "time": time.time(),
+                }
+
+        # Check if we have an active or recently uploaded table
+        active_table = table
+        if not active_table and session_key in _LAST_UPLOADED_TABLE:
+            cached_info = _LAST_UPLOADED_TABLE[session_key]
+            if (time.time() - cached_info.get("time", 0)) < 7200:
+                active_table = cached_info.get("table")
+                if not file_note:
+                    file_note = f"\n[Previously uploaded Excel sheet '{cached_info.get('name', '')}' is still active in session.]"
 
         full_message = (user_message + (file_note or "")).strip() or (
             f"Uploaded: {uploaded_file.name}" if uploaded_file else ""
@@ -678,11 +699,29 @@ def ai_agent_chat(request):
         _CHAT_SESSIONS[session_key] = stored[-40:]
 
         clean_reply, raw_actions = extract_actions_from_reply(reply_text)
-        if not raw_actions and table:
-            from .actions import table_to_import_actions
-            raw_actions = table_to_import_actions(table, user_message)
-            if raw_actions and not clean_reply:
-                clean_reply = "Sheet padh li. Neeche preview hai — Confirm se ERP mein save hoga."
+        from .actions import table_to_import_actions
+
+        # If LLM proposed import_items or import_production without rows, populate from table
+        if raw_actions and active_table:
+            for act in raw_actions:
+                if act.get("action") in ("import_items", "import_production") and not act.get("rows"):
+                    tbl_acts = table_to_import_actions(active_table, act.get("module") or user_message)
+                    if tbl_acts and tbl_acts[0].get("rows"):
+                        act["rows"] = tbl_acts[0]["rows"]
+                        if not act.get("module"):
+                            act["module"] = tbl_acts[0].get("module", "auto_tyre")
+
+        # If LLM did not propose an action block, but a table exists and user wants to import/add
+        if not raw_actions and active_table:
+            wants_import = (not user_message) or any(
+                w in user_message.lower()
+                for w in ("import", "add", "kro", "karo", "save", "daal", "chadao", "lo inko", "inh sabko", "tyre add", "item add")
+            )
+            if wants_import or uploaded_file:
+                raw_actions = table_to_import_actions(active_table, user_message)
+                if raw_actions and not clean_reply:
+                    clean_reply = f"Excel sheet padh li hai. Niche preview ready hai — Confirm dabate hi ERP mein save ho jaayenge."
+
         proposed, action_errors = store_proposed_actions(user, session_key, raw_actions) if raw_actions else ([], [])
         if action_errors:
             extra = "\n\nKuch actions propose nahi ho sake:\n- " + "\n- ".join(action_errors[:8])

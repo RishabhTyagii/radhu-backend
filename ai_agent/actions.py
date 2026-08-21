@@ -622,46 +622,60 @@ HEADER_ALIASES = {
     "boxtype": "box_type",
     "box_type": "box_type",
     "tyre_size": "size",
+    "size": "size",
     "item": "name",
     "item_name": "name",
+    "name": "name",
     "qty": "quantity",
     "qty.": "quantity",
+    "quantity": "quantity",
     "allcuring": "all_curing",
     "all_curing": "all_curing",
     "curing": "all_curing",
     "2nd": "second_grade",
     "2nd_grade": "second_grade",
     "second": "second_grade",
+    "second_grade": "second_grade",
     "rejected": "rejected_grade",
+    "rejected_grade": "rejected_grade",
     "pattern_name": "pattern",
+    "pattern": "pattern",
     "tyre_name": "tyre",
+    "tyre": "tyre",
     "brand_name": "brand",
+    "brand": "brand",
+    "weight": "weight",
+    "net_weight": "weight",
+    "gross_weight": "weight",
+    "type": "type",
+    "tyre_type": "type",
+    "material": "material",
+    "ply": "ply",
+    "opening_stock": "stock",
+    "stock": "stock",
 }
 
 
-def guess_module_from_text(text):
+def guess_module_from_text(text, headers=None):
     msg = (text or "").lower()
-    if "tube" in msg:
+    headers_set = set(headers or [])
+    if "tube" in msg or "tube_quality" in headers_set:
         return "cycle_tube"
-    if "auto" in msg:
+    if "auto" in msg or "pattern" in headers_set or "tyre" in headers_set:
         return "auto_tyre"
-    return "cycle_tyre"
+    if "box_type" in headers_set or "material" in headers_set:
+        return "cycle_tyre"
+    return "auto_tyre" if ("tyre" in headers_set or "pattern" in headers_set) else "cycle_tyre"
 
 
-def table_to_import_actions(table, user_message):
+def table_to_import_actions(table, user_message=""):
     """Build one import_* action from a header+rows table when user asks to import/add."""
     if not table or len(table) < 2:
         return []
     msg = (user_message or "").lower()
     if any(w in msg for w in ("kya hai", "analyse", "analyze", "dikhao", "summary", "explain")) and not any(
-        w in msg for w in ("import", "add kar", "save", "daal")
+        w in msg for w in ("import", "add", "kro", "karo", "save", "daal", "chadao")
     ):
-        return []
-    wants_write = (not msg) or any(w in msg for w in (
-        "import", "add kar", "add karo", "sheet se", "excel", "upload", "daal", "save kar",
-        "production",
-    ))
-    if not wants_write:
         return []
 
     headers = []
@@ -669,7 +683,7 @@ def table_to_import_actions(table, user_message):
         key = str(h or "").strip().lower().replace(" ", "_").replace("-", "_")
         headers.append(HEADER_ALIASES.get(key, key))
 
-    module = guess_module_from_text(user_message)
+    module = guess_module_from_text(user_message, headers)
     prod_cols = {"all_curing", "quantity", "production_tyre", "second_grade"}
     is_prod = bool(prod_cols.intersection(headers)) and (
         "production" in msg or "curing" in msg or "all_curing" in headers
@@ -691,20 +705,26 @@ def table_to_import_actions(table, user_message):
             obj.setdefault("box_type", "BOX")
             if not obj.get("material"):
                 obj["material"] = "Nylon"
-        if module == "auto_tyre" and obj.get("name") and not obj.get("tyre"):
-            obj["tyre"] = obj["name"]
+        if module == "auto_tyre":
+            if obj.get("name") and not obj.get("tyre"):
+                obj["tyre"] = obj["name"]
+            if obj.get("size") and not obj.get("tyre"):
+                obj["tyre"] = obj["size"]
+            if not obj.get("pattern"):
+                obj["pattern"] = "DEFAULT"
+            if not obj.get("type"):
+                obj["type"] = "TT"
         if module == "cycle_tyre" and not obj.get("size"):
             continue
         if module == "cycle_tube" and not obj.get("size"):
             continue
-        if module == "auto_tyre" and not (obj.get("tyre") or obj.get("size")):
+        if module == "auto_tyre" and not obj.get("tyre"):
             continue
-        if module == "auto_tyre" and obj.get("size") and not obj.get("tyre"):
-            obj["tyre"] = obj["size"]
         rows.append(obj)
 
     if not rows:
         return []
     action = "import_production" if is_prod else "import_items"
     return [{"action": action, "module": module, "rows": rows}]
+
 
