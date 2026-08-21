@@ -19,19 +19,43 @@ from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODELS = [
-    os.environ.get("GEMINI_MODEL", "").strip(),
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-1.5-flash",
-]
-GEMINI_MODELS = [m for m in GEMINI_MODELS if m]
-
 MAX_FILE_BYTES = 8 * 1024 * 1024
 CONTEXT_TTL_SECONDS = 60
 _CHAT_SESSIONS = {}
 _CONTEXT_CACHE = {"built_at": 0, "text": ""}
+
+
+def _get_effective_ai_config():
+    """
+    Returns AI config dict. Prefers database AiConfig record from Django admin,
+    falls back to environment variables.
+    """
+    try:
+        from .models import AiConfig
+        cfg = AiConfig.get_solo()
+        api_key = (cfg.api_key or "").strip() or os.environ.get("GEMINI_API_KEY", "").strip()
+        primary_model = (cfg.model_name or "").strip() or "gemini-2.5-flash"
+        fallback_model = (cfg.fallback_model or "").strip() or "gemini-1.5-flash"
+        is_enabled = bool(cfg.is_enabled)
+        temp = float(cfg.temperature) if cfg.temperature is not None else 0.4
+        extra = (cfg.system_instructions_extra or "").strip()
+        return {
+            "api_key": api_key,
+            "primary_model": primary_model,
+            "fallback_model": fallback_model,
+            "is_enabled": is_enabled,
+            "temperature": temp,
+            "extra_instructions": extra,
+        }
+    except Exception:
+        return {
+            "api_key": os.environ.get("GEMINI_API_KEY", "").strip(),
+            "primary_model": os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash",
+            "fallback_model": "gemini-1.5-flash",
+            "is_enabled": True,
+            "temperature": 0.4,
+            "extra_instructions": "",
+        }
 
 ACTION_BLOCK_RE = re.compile(r"```radhu_action\s*([\s\S]*?)```", re.I)
 PROPOSAL_TTL_MINUTES = 30
@@ -486,16 +510,36 @@ def _parse_upload(uploaded_file):
 def _send_gemini(history, parts):
     import google.generativeai as genai
 
-    last_error = None
-    genai.configure(api_key=GEMINI_API_KEY)
+    config = _get_effective_ai_config()
+    api_key = config["api_key"]
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY is not set. Please enter your API key in Django Admin under 'AI Configuration & API Keys'.")
+
+    genai.configure(api_key=api_key)
     system = _get_system_context()
+    if config["extra_instructions"]:
+        system += f"\n\nEXTRA BUSINESS RULES (from Admin):\n{config['extra_instructions']}"
+
     safe_history = _history_for_gemini(history)
 
-    for model_name in GEMINI_MODELS:
+    # Build model priority order based on admin selection
+    models_to_try = [config["primary_model"]]
+    if config["fallback_model"] and config["fallback_model"] not in models_to_try:
+        models_to_try.append(config["fallback_model"])
+    for default_m in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]:
+        if default_m not in models_to_try:
+            models_to_try.append(default_m)
+
+    last_error = None
+    for model_name in models_to_try:
         try:
+            generation_config = {
+                "temperature": config["temperature"],
+            }
             model = genai.GenerativeModel(
                 model_name=model_name,
                 system_instruction=system,
+                generation_config=generation_config,
             )
             chat = model.start_chat(history=safe_history)
             response = chat.send_message(parts)
@@ -511,10 +555,20 @@ def _send_gemini(history, parts):
 @permission_classes([IsAuthenticated])
 @parser_classes([MultiPartParser, FormParser, JSONParser])
 def ai_agent_chat(request):
-    if not GEMINI_API_KEY:
+    config = _get_effective_ai_config()
+    if not config["is_enabled"]:
         return Response(
             {
-                "error": "GEMINI_API_KEY not configured on server.",
+                "error": "AI Assistant is currently disabled in Django Admin.",
+                "reply": None,
+            },
+            status=503,
+        )
+
+    if not config["api_key"]:
+        return Response(
+            {
+                "error": "Gemini API Key not configured. Please add it in Django Admin (/admin/) under 'AI Configuration & API Keys'.",
                 "reply": None,
             },
             status=503,
@@ -698,11 +752,25 @@ def ai_audit_logs(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def ai_agent_status(request):
-    has_key = bool(GEMINI_API_KEY)
+    config = _get_effective_ai_config()
+    has_key = bool(config["api_key"])
+    is_ready = has_key and config["is_enabled"]
     return Response({
-        "ready": has_key,
-        "model": GEMINI_MODELS[0] if GEMINI_MODELS else "gemini-2.0-flash",
-        "message": "RADHU AI Ready!" if has_key else "GEMINI_API_KEY not configured.",
+        "ready": is_ready,
+        "is_enabled": config["is_enabled"],
+        "has_key": has_key,
+        "model": config["primary_model"],
+        "fallback_model": config["fallback_model"],
+        "temperature": config["temperature"],
+        "message": (
+            f"RADHU AI Ready ({config['primary_model']})"
+            if is_ready
+            else (
+                "AI Assistant is disabled in Django Admin."
+                if not config["is_enabled"]
+                else "GEMINI_API_KEY not configured. Add it in Django Admin (/admin/)."
+            )
+        ),
         "can_write": True,
         "confirm_required": True,
     })

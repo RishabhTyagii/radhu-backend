@@ -62,3 +62,63 @@ class AiAuditLog(models.Model):
 
     def __str__(self):
         return f"{self.created_at:%Y-%m-%d %H:%M} | {self.user} | {self.action_type} | {self.status}"
+
+
+class AiConfig(models.Model):
+    MODEL_CHOICES = [
+        ("gemini-2.5-flash", "Gemini 2.5 Flash (Recommended — Fastest & Smartest)"),
+        ("gemini-2.0-flash", "Gemini 2.0 Flash (Fast & High Volume)"),
+        ("gemini-1.5-flash", "Gemini 1.5 Flash (Stable & Highly Compatible)"),
+        ("gemini-1.5-pro", "Gemini 1.5 Pro (Deep Reasoning & Large Analysis)"),
+    ]
+
+    api_key = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Google AI Studio Gemini API Key (e.g. AIzaSy...). Rotate/update anytime here.",
+        verbose_name="Gemini API Key",
+    )
+    model_name = models.CharField(
+        max_length=50,
+        choices=MODEL_CHOICES,
+        default="gemini-2.5-flash",
+        help_text="Primary model used by the AI Agent.",
+        verbose_name="Active AI Model",
+    )
+    fallback_model = models.CharField(
+        max_length=50,
+        choices=MODEL_CHOICES,
+        default="gemini-1.5-flash",
+        help_text="Secondary model used automatically if the primary model hits quota/rate limits.",
+        verbose_name="Fallback Model",
+    )
+    is_enabled = models.BooleanField(
+        default=True,
+        help_text="Enable or disable the AI Agent assistant across the ERP.",
+        verbose_name="Enable AI Assistant",
+    )
+    temperature = models.FloatField(
+        default=0.4,
+        help_text="0.0 to 1.0. Lower values (0.2-0.4) are more precise for ERP data; higher is more conversational.",
+        verbose_name="Temperature (Creativity)",
+    )
+    system_instructions_extra = models.TextField(
+        blank=True,
+        help_text="Optional custom instructions to add to the ERP system prompt (e.g. custom pricing policies, holiday notices).",
+        verbose_name="Extra Prompt Instructions",
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "AI Configuration & API Keys"
+        verbose_name_plural = "AI Configuration & API Keys"
+
+    def __str__(self):
+        status = "Active" if self.is_enabled else "Disabled"
+        key_status = "Key Set" if self.api_key else "No Key"
+        return f"AI Config ({self.model_name}) — [{status} | {key_status}]"
+
+    @classmethod
+    def get_solo(cls):
+        obj, _ = cls.objects.get_or_create(id=1)
+        return obj
