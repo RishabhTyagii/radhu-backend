@@ -62,6 +62,10 @@ PAGES_MAP = {
         ('create_user', 'Create User'),
         ('edit_user', 'Edit User'),
     ],
+    'RADHU AI': [
+        ('ai_agent', 'AI Agent Chat'),
+        ('ai_audit_log', 'AI Audit Log'),
+    ],
 }
 
 

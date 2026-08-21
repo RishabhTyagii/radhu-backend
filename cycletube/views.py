@@ -23,100 +23,203 @@ from .serializers import (
 )
 
 
+def _recalculate_tube_stocks():
+    for item in CycleTubeItem.objects.all():
+        p_stock = CycleTubeEntry.objects.filter(tube_item=item, entry_type='production', bucket='stock').aggregate(t=Sum('quantity'))['t'] or 0
+        s_stock = CycleTubeEntry.objects.filter(tube_item=item, entry_type='sale', bucket='stock').aggregate(t=Sum('quantity'))['t'] or 0
+        a_stock = CycleTubeEntry.objects.filter(tube_item=item, entry_type='adjustment', bucket='stock').aggregate(t=Sum('quantity'))['t'] or 0
+
+        p_rfm = CycleTubeEntry.objects.filter(tube_item=item, entry_type='production', bucket='rfm_stock').aggregate(t=Sum('quantity'))['t'] or 0
+        s_rfm = CycleTubeEntry.objects.filter(tube_item=item, entry_type='sale', bucket='rfm_stock').aggregate(t=Sum('quantity'))['t'] or 0
+        a_rfm = CycleTubeEntry.objects.filter(tube_item=item, entry_type='adjustment', bucket='rfm_stock').aggregate(t=Sum('quantity'))['t'] or 0
+
+        item.stock = p_stock - s_stock + a_stock
+        item.rfm_stock = p_rfm - s_rfm + a_rfm
+        item.save(update_fields=['stock', 'rfm_stock'])
+
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def dashboard(request):
     """
-    Dashboard API: Returns items list with month_production and month_sale per item,
-    plus overall stats (today_production, today_sale, month_production, month_sale)
-    and overall totals.
+    Dashboard API: Returns items list with previous closing, month_production, month_sale,
+    closing_stock, isolated rfm_stock, and total_stock per item, with month and custom date range filters.
     """
-    today = datetime.date.today()
-    month_start = today.replace(day=1)
+    _recalculate_tube_stocks()
 
-    # Stats calculation
+    today = datetime.date.today()
+    start_date_param = request.query_params.get("start_date", "").strip()
+    end_date_param = request.query_params.get("end_date", "").strip()
+    month_param = request.query_params.get("month", "").strip()
+
+    filter_start = None
+    filter_end = None
+    is_filtered_range = False
+
+    if start_date_param and end_date_param:
+        try:
+            filter_start = datetime.datetime.strptime(start_date_param, "%Y-%m-%d").date()
+            filter_end = datetime.datetime.strptime(end_date_param, "%Y-%m-%d").date()
+            is_filtered_range = True
+        except ValueError:
+            pass
+
+    if not is_filtered_range:
+        if not month_param:
+            month_param = f"{today.year}-{today.month:02d}"
+
+        if month_param != "all":
+            try:
+                parts = month_param.split("-")
+                year, month = int(parts[0]), int(parts[1])
+                filter_start = datetime.date(year, month, 1)
+                if month == 12:
+                    filter_end = datetime.date(year + 1, 1, 1) - datetime.timedelta(days=1)
+                else:
+                    filter_end = datetime.date(year, month + 1, 1) - datetime.timedelta(days=1)
+                is_filtered_range = True
+            except (ValueError, IndexError):
+                month_param = "all"
+                is_filtered_range = False
+
+    # Stats calculation for today
     today_prod = (
-        CycleTubeEntry.objects.filter(date=today, entry_type="production").aggregate(
+        CycleTubeEntry.objects.filter(date=today, entry_type="production", bucket="stock").aggregate(
             total=Sum("quantity")
         )["total"]
         or 0
     )
 
     today_sale = (
-        CycleTubeEntry.objects.filter(date=today, entry_type="sale").aggregate(
+        CycleTubeEntry.objects.filter(date=today, entry_type="sale", bucket="stock").aggregate(
             total=Sum("quantity")
         )["total"]
         or 0
     )
 
-    month_prod = (
-        CycleTubeEntry.objects.filter(
-            date__gte=month_start, date__lte=today, entry_type="production"
-        ).aggregate(total=Sum("quantity"))["total"]
-        or 0
-    )
-
-    month_sale = (
-        CycleTubeEntry.objects.filter(
-            date__gte=month_start, date__lte=today, entry_type="sale"
-        ).aggregate(total=Sum("quantity"))["total"]
-        or 0
-    )
-
-    # Item-wise calculation
     active_items = CycleTubeItem.objects.filter(is_active=True)
     items_data = []
 
-    total_stock = 0
-    total_rfm_stock = 0
-    total_combined_stock = 0
-    total_month_prod = 0
-    total_month_sale = 0
+    tot_prev_closing = 0
+    tot_month_prod = 0
+    tot_month_sale = 0
+    tot_closing_stock = 0
+    tot_rfm_stock = 0
+    tot_total_stock = 0
 
     for item in active_items:
-        item_m_prod = (
-            CycleTubeEntry.objects.filter(
-                tube_item=item, date__gte=month_start, entry_type="production"
-            ).aggregate(total=Sum("quantity"))["total"]
-            or 0
-        )
+        if is_filtered_range and filter_start and filter_end:
+            # Prior closing before start date (main stock only)
+            p_prev = CycleTubeEntry.objects.filter(
+                tube_item=item, entry_type="production", bucket="stock", date__lt=filter_start
+            ).aggregate(t=Sum("quantity"))["t"] or 0
+            s_prev = CycleTubeEntry.objects.filter(
+                tube_item=item, entry_type="sale", bucket="stock", date__lt=filter_start
+            ).aggregate(t=Sum("quantity"))["t"] or 0
+            a_prev = CycleTubeEntry.objects.filter(
+                tube_item=item, entry_type="adjustment", bucket="stock", date__lt=filter_start
+            ).aggregate(t=Sum("quantity"))["t"] or 0
 
-        item_m_sale = (
-            CycleTubeEntry.objects.filter(
-                tube_item=item, date__gte=month_start, entry_type="sale"
-            ).aggregate(total=Sum("quantity"))["total"]
-            or 0
-        )
+            prev_closing = p_prev - s_prev + a_prev
+
+            # In-range production and sales (strictly main stock, RFM isolated)
+            month_prod = CycleTubeEntry.objects.filter(
+                tube_item=item, entry_type="production", bucket="stock", date__gte=filter_start, date__lte=filter_end
+            ).aggregate(t=Sum("quantity"))["t"] or 0
+
+            month_sale = CycleTubeEntry.objects.filter(
+                tube_item=item, entry_type="sale", bucket="stock", date__gte=filter_start, date__lte=filter_end
+            ).aggregate(t=Sum("quantity"))["t"] or 0
+
+            month_adj = CycleTubeEntry.objects.filter(
+                tube_item=item, entry_type="adjustment", bucket="stock", date__gte=filter_start, date__lte=filter_end
+            ).aggregate(t=Sum("quantity"))["t"] or 0
+
+            closing_stock = prev_closing + month_prod - month_sale + month_adj
+            rfm = item.rfm_stock
+            total_stock_item = closing_stock + rfm
+
+        else:
+            # All time
+            prev_closing = 0
+
+            month_prod = CycleTubeEntry.objects.filter(
+                tube_item=item, entry_type="production", bucket="stock"
+            ).aggregate(t=Sum("quantity"))["t"] or 0
+
+            month_sale = CycleTubeEntry.objects.filter(
+                tube_item=item, entry_type="sale", bucket="stock"
+            ).aggregate(t=Sum("quantity"))["t"] or 0
+
+            closing_stock = item.stock
+            rfm = item.rfm_stock
+            total_stock_item = closing_stock + rfm
 
         serialized = CycleTubeItemSerializer(item).data
-        serialized["month_production"] = item_m_prod
-        serialized["month_sale"] = item_m_sale
+        serialized.update({
+            "prev_closing": prev_closing,
+            "month_production": month_prod,
+            "month_sale": month_sale,
+            "closing_stock": closing_stock,
+            "rfm_stock": rfm,
+            "total_stock": total_stock_item,
+        })
         items_data.append(serialized)
 
-        total_stock += item.stock
-        total_rfm_stock += item.rfm_stock
-        total_combined_stock += item.total_stock
-        total_month_prod += item_m_prod
-        total_month_sale += item_m_sale
+        tot_prev_closing += prev_closing
+        tot_month_prod += month_prod
+        tot_month_sale += month_sale
+        tot_closing_stock += closing_stock
+        tot_rfm_stock += rfm
+        tot_total_stock += total_stock_item
 
-    return Response(
-        {
-            "stats": {
-                "today_production": today_prod,
-                "today_sale": today_sale,
-                "month_production": month_prod,
-                "month_sale": month_sale,
-            },
-            "totals": {
-                "total_stock": total_stock,
-                "total_rfm_stock": total_rfm_stock,
-                "total_combined_stock": total_combined_stock,
-                "total_month_production": total_month_prod,
-                "total_month_sale": total_month_sale,
-            },
-            "items": items_data,
-        }
-    )
+    # Dynamic available months
+    entry_dates = CycleTubeEntry.objects.dates("date", "month", order="DESC")
+    month_set = set()
+    available_months = [{"value": "all", "label": "All Time / Overall"}]
+
+    standard_months = [
+        ("2026-08", "August 2026"),
+        ("2026-07", "July 2026"),
+        ("2026-06", "June 2026"),
+        ("2026-05", "May 2026"),
+        ("2026-04", "April 2026"),
+    ]
+    for val, lbl in standard_months:
+        available_months.append({"value": val, "label": lbl})
+        month_set.add(val)
+
+    for ed in entry_dates:
+        val = f"{ed.year}-{ed.month:02d}"
+        if val not in month_set:
+            lbl = ed.strftime("%B %Y")
+            available_months.append({"value": val, "label": lbl})
+            month_set.add(val)
+
+    return Response({
+        "selected_month": month_param or "custom",
+        "start_date": str(filter_start) if filter_start else None,
+        "end_date": str(filter_end) if filter_end else None,
+        "available_months": available_months,
+        "stats": {
+            "today_production": today_prod,
+            "today_sale": today_sale,
+            "month_production": tot_month_prod,
+            "month_sale": tot_month_sale,
+            "closing_stock": tot_closing_stock,
+            "rfm_stock": tot_rfm_stock,
+            "total_stock": tot_total_stock,
+        },
+        "totals": {
+            "prev_closing": tot_prev_closing,
+            "month_production": tot_month_prod,
+            "month_sale": tot_month_sale,
+            "closing_stock": tot_closing_stock,
+            "rfm_stock": tot_rfm_stock,
+            "total_stock": tot_total_stock,
+        },
+        "items": items_data,
+    })
 
 
 @api_view(["POST"])

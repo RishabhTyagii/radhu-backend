@@ -12,4 +12,10 @@ urlpatterns = [
     path('api/hrms/', include('hrms.urls')),
     path('api/orders/', include('orders.urls')),
     path('api/accounts/', include('accounts.urls')),
+    path('api/ai/', include('ai_agent.urls')),
 ]
+
+admin.site.site_header = "Radhu Industries ERP Admin"
+admin.site.site_title = "Radhu ERP"
+admin.site.index_title = "Radhu Industries Management Portal"
+

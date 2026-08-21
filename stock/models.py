@@ -13,6 +13,8 @@ class TyreItem(models.Model):
     rfm_ok_tyre = models.IntegerField("RFM OK Tyre", default=0)
     old_tyres_2025 = models.IntegerField("2025 Old Tyres", default=0)
     stock = models.IntegerField("STOCK", default=0)
+    second_stock = models.IntegerField("2nd Grade Stock", default=0)
+    third_stock = models.IntegerField("3rd Grade Stock", default=0)
     on_hold_export = models.IntegerField("On hold for Export / OR", default=0)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)

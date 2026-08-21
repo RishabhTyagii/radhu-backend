@@ -2,6 +2,7 @@ from django.db import transaction
 from django.db.models import Sum, Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django.views.decorators.csrf import csrf_exempt
 
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
@@ -88,30 +89,38 @@ def _build_stock_data(user):
 
 
 # Party Endpoints
+@csrf_exempt
 @api_view(["GET", "POST"])
 @permission_classes([IsAuthenticated])
 def party_list(request):
     if request.method == "GET":
-        parties = Party.objects.filter(user=request.user)
+        parties = Party.objects.all()
         return Response(PartySerializer(parties, many=True).data)
 
     name = str(request.data.get("name", "")).strip()
     if not name:
         return Response({"error": "Party name is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-    party, created = Party.objects.get_or_create(user=request.user, name=name)
-    return Response(PartySerializer(party).data, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+    # Check case-insensitive existing party
+    existing = Party.objects.filter(name__iexact=name).first()
+    if existing:
+        return Response(PartySerializer(existing).data, status=status.HTTP_200_OK)
+
+    party = Party.objects.create(user=request.user, name=name)
+    return Response(PartySerializer(party).data, status=status.HTTP_201_CREATED)
 
 
+@csrf_exempt
 @api_view(["DELETE"])
 @permission_classes([IsAuthenticated])
 def party_detail(request, pk):
-    party = get_object_or_404(Party, pk=pk, user=request.user)
+    party = get_object_or_404(Party, pk=pk)
     party.delete()
     return Response({"ok": True})
 
 
 # Stock Catalog for Order Booking
+@csrf_exempt
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def stock_catalog(request):
@@ -120,6 +129,7 @@ def stock_catalog(request):
 
 
 # Order Endpoints
+@csrf_exempt
 @api_view(["GET", "POST"])
 @permission_classes([IsAuthenticated])
 def order_list(request):
@@ -144,7 +154,7 @@ def order_list(request):
     if not party_id:
         return Response({"error": "party_id is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-    party = get_object_or_404(Party, id=party_id, user=request.user)
+    party = get_object_or_404(Party, id=party_id)
 
     if not items or len(items) == 0:
         return Response({"error": "At least one item is required to place an order"}, status=status.HTTP_400_BAD_REQUEST)
@@ -163,21 +173,22 @@ def order_list(request):
             cat = it.get("category")
             item_id = it.get("item_id")
             qty = int(it.get("quantity", 0))
+            price = float(it.get("price", 0.0) or 0.0)
 
             if qty <= 0 or not cat or not item_id:
                 continue
 
             if cat == "auto_tyre":
                 tyre = get_object_or_404(TyreItem, pk=item_id)
-                OrderItem.objects.create(order=order, category=cat, tyre_item=tyre, quantity=qty)
+                OrderItem.objects.create(order=order, category=cat, tyre_item=tyre, quantity=qty, price=price)
                 items_added += 1
             elif cat == "cycle_tube":
                 tube = get_object_or_404(CycleTubeItem, pk=item_id)
-                OrderItem.objects.create(order=order, category=cat, tube_item=tube, quantity=qty)
+                OrderItem.objects.create(order=order, category=cat, tube_item=tube, quantity=qty, price=price)
                 items_added += 1
             elif cat == "cycle_tyre":
                 ctyre = get_object_or_404(CycleTyreItem, pk=item_id)
-                OrderItem.objects.create(order=order, category=cat, cycle_tyre_item=ctyre, quantity=qty)
+                OrderItem.objects.create(order=order, category=cat, cycle_tyre_item=ctyre, quantity=qty, price=price)
                 items_added += 1
 
         if items_added == 0:
@@ -189,6 +200,7 @@ def order_list(request):
     return Response(OrderSerializer(order).data, status=status.HTTP_201_CREATED)
 
 
+@csrf_exempt
 @api_view(["GET", "PATCH", "DELETE"])
 @permission_classes([IsAuthenticated])
 def order_detail(request, pk):

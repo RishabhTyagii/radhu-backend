@@ -29,41 +29,100 @@ def _to_decimal(value):
         return Decimal("0")
 
 
-def _reduce_stock_for_item(module, item, qty, voucher_number, voucher_date, party_name):
-    """Create a sale/dispatch entry for this item, reducing its STOCK bucket."""
+def _reduce_stock_for_item(module, item, qty, voucher_number, voucher_date, party_name, tally_item_name="", pending_id=None):
+    """Create a sale/dispatch entry for this item, reducing its appropriate stock bucket:
+       - 1st Grade / Main Stock
+       - B Grade (2nd Grade Stock)
+       - C Grade (3rd Grade / Reject / RFM Stock)
+    """
     if item is None:
         return False, "Mapped item not found in the module (was it deleted?)."
 
-    current = item.stock
-    remark = f"Tally auto-sync | Party: {party_name or '-'}"
+    category_override = None
+    if pending_id:
+        pending = TallyPendingItem.objects.filter(pk=pending_id).first()
+        if pending:
+            category_override = pending.category_override
+
+    name_lower = str(tally_item_name or "").lower()
+
+    is_c_grade = (category_override == "cgrade") or any(k in name_lower for k in ["c grade", "c-grade", "3rd grade", "3rd", "c_grade", "c.grade", "reject"])
+    is_b_grade = ((category_override == "bgrade") or any(k in name_lower for k in ["b grade", "b-grade", "2nd grade", "2nd", "b_grade", "b.grade"])) and not is_c_grade
+
+    base_remark = f"Tally auto-sync | Party: {party_name or '-'}"
 
     if module == "tyre":
         from stock.models import DailyEntry
+        if is_c_grade:
+            bucket = "third_stock"
+            current = getattr(item, "third_stock", 0)
+            stock_field = "third_stock"
+            remark = f"{base_remark} [C-Grade / 3rd Stock]"
+        elif is_b_grade:
+            bucket = "second_stock"
+            current = getattr(item, "second_stock", 0)
+            stock_field = "second_stock"
+            remark = f"{base_remark} [B-Grade / 2nd Stock]"
+        else:
+            bucket = "stock"
+            current = item.stock
+            stock_field = "stock"
+            remark = base_remark
+
         with transaction.atomic():
-            item.stock = current - qty
-            item.save(update_fields=["stock"])
+            setattr(item, stock_field, current - qty)
+            item.save(update_fields=[stock_field])
             DailyEntry.objects.create(
-                tyre_item=item, entry_type="dispatch", bucket="stock",
+                tyre_item=item, entry_type="dispatch", bucket=bucket,
                 quantity=qty, date=voucher_date, bill_number=voucher_number,
                 remark=remark, user=None,
             )
+
     elif module == "tube":
         from cycletube.models import CycleTubeEntry
+        if is_c_grade:
+            bucket = "rfm_stock"
+            current = item.rfm_stock
+            stock_field = "rfm_stock"
+            remark = f"{base_remark} [C-Grade / Reject Stock]"
+        else:
+            bucket = "stock"
+            current = item.stock
+            stock_field = "stock"
+            remark = base_remark
+
         with transaction.atomic():
-            item.stock = current - qty
-            item.save(update_fields=["stock"])
+            setattr(item, stock_field, current - qty)
+            item.save(update_fields=[stock_field])
             CycleTubeEntry.objects.create(
-                tube_item=item, entry_type="sale", bucket="stock",
+                tube_item=item, entry_type="sale", bucket=bucket,
                 quantity=qty, date=voucher_date, bill_number=voucher_number,
                 remark=remark, user=None,
             )
+
     elif module == "cycletyre":
         from cycletyres.models import CycleTyreEntry
+        if is_c_grade:
+            bucket = "rejected_stock"
+            current = getattr(item, "rejected_stock", 0)
+            stock_field = "rejected_stock"
+            remark = f"{base_remark} [C-Grade / Reject Stock]"
+        elif is_b_grade:
+            bucket = "second_stock"
+            current = item.second_stock
+            stock_field = "second_stock"
+            remark = f"{base_remark} [B-Grade Stock]"
+        else:
+            bucket = "stock"
+            current = item.stock
+            stock_field = "stock"
+            remark = base_remark
+
         with transaction.atomic():
-            item.stock = current - qty
-            item.save(update_fields=["stock"])
+            setattr(item, stock_field, current - qty)
+            item.save(update_fields=[stock_field])
             CycleTyreEntry.objects.create(
-                tyre_item=item, entry_type="sale", bucket="stock",
+                tyre_item=item, entry_type="sale", bucket=bucket,
                 quantity=qty, date=voucher_date, bill_number=voucher_number,
                 remark=remark, user=None,
             )
@@ -95,6 +154,8 @@ def retry_pending_items(tally_item_name=None):
         ok, msg = _reduce_stock_for_item(
             mapping.module, item, pending.qty,
             pending.voucher_number, pending.voucher_date, pending.party_name,
+            tally_item_name=pending.tally_item_name,
+            pending_id=pending.id
         )
         if ok:
             pending.resolved = True
@@ -186,7 +247,8 @@ def tally_webhook(request):
 
         item = mapping.get_item()
         ok, msg = _reduce_stock_for_item(
-            mapping.module, item, qty, voucher_number, voucher_date, party_name
+            mapping.module, item, qty, voucher_number, voucher_date, party_name,
+            tally_item_name=tally_name
         )
         if not ok:
             all_ok = False
@@ -422,7 +484,7 @@ def sync_log(request):
     import math
     total_pages = math.ceil(total_logs / page_size) if total_logs > 0 else 1
 
-    return Response({
+    response = Response({
         "logs": TallySyncLogSerializer(logs, many=True).data,
         "total_logs": total_logs,
         "page": page,
@@ -431,6 +493,10 @@ def sync_log(request):
         "pending": TallyPendingItemSerializer(pending, many=True).data,
         "pending_total": pending.count(),
     })
+    response["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response["Pragma"] = "no-cache"
+    response["Expires"] = "0"
+    return response
 
 
 @csrf_exempt
@@ -459,6 +525,8 @@ def retry_single_pending(request, pk):
     ok, msg = _reduce_stock_for_item(
         mapping.module, item, pending.qty,
         pending.voucher_number, pending.voucher_date, pending.party_name,
+        tally_item_name=pending.tally_item_name,
+        pending_id=pending.id
     )
     if ok:
         pending.resolved = True
@@ -561,6 +629,8 @@ def map_pending_item(request, pk):
         ok, msg = _reduce_stock_for_item(
             module, target_item, pending.qty,
             pending.voucher_number, pending.voucher_date, pending.party_name,
+            tally_item_name=pending.tally_item_name,
+            pending_id=pending.id
         )
         if ok:
             pending.resolved = True
@@ -610,3 +680,86 @@ def all_stock_items(request):
         "tube_items": tube_items,
         "cycletyre_items": cycletyre_items,
     })
+
+
+# ============================================================
+# Excel mapping import / export
+# ============================================================
+
+@csrf_exempt
+@api_view(["POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def import_mapping_excel(request):
+    file_obj = request.FILES.get("file") or request.FILES.get("excel_file")
+    if not file_obj:
+        return Response(
+            {"error": "No file uploaded. Select the Tally mapping Excel (.xlsx)."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    name = (file_obj.name or "").lower()
+    if not name.endswith((".xlsx", ".xlsm")):
+        return Response(
+            {"error": "Please upload an .xlsx file (Excel 2007+)."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    dry_run = str(request.data.get("dry_run", "")).lower() in {"1", "true", "yes"}
+
+    from .excel_mapping import parse_mapping_workbook, import_mapping_rows
+
+    try:
+        rows = parse_mapping_workbook(file_obj)
+    except Exception as exc:
+        return Response(
+            {"error": f"Could not read Excel file: {exc}"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if not rows:
+        return Response(
+            {"error": "No Tally item rows found. Use the 'Tally Item Mapping' sheet with a Tally Item Name column."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    result = import_mapping_rows(rows, dry_run=dry_run)
+    resolved = 0
+    if not dry_run:
+        for tally_name in result["imported_names"]:
+            resolved += retry_pending_items(tally_item_name=tally_name)
+
+    return Response({
+        "ok": True,
+        "dry_run": dry_run,
+        "row_count": len(rows),
+        "created": result["created"],
+        "updated": result["updated"],
+        "skipped": result["skipped"],
+        "imported_count": result["imported_count"],
+        "unmatched": result["unmatched"],
+        "unmatched_count": len(result["unmatched"]),
+        "resolved_count": resolved,
+        "message": (
+            f"{'Preview: ' if dry_run else ''}"
+            f"{result['created']} new, {result['updated']} updated, "
+            f"{result['skipped']} skipped, {len(result['unmatched'])} unmatched."
+        ),
+    })
+
+
+@csrf_exempt
+@api_view(["GET"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def export_mapping_excel(request):
+    from django.http import HttpResponse
+    from .excel_mapping import build_export_workbook
+
+    buf = build_export_workbook()
+    response = HttpResponse(
+        buf.getvalue(),
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    response["Content-Disposition"] = 'attachment; filename="Radhu_Tally_Item_Mapping.xlsx"'
+    return response

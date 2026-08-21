@@ -14,6 +14,7 @@ ALLOWED_HOSTS = ['*']
 
 # Application definition
 INSTALLED_APPS = [
+    'jazzmin',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -29,12 +30,13 @@ INSTALLED_APPS = [
     'tallysync',
     'hrms',
     'orders',
+    'ai_agent',
 ]
 
 MIDDLEWARE = [
+    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
-    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
@@ -108,7 +110,8 @@ TIME_ZONE = 'Asia/Kolkata'
 USE_I18N = True
 USE_TZ = True
 
-STATIC_URL = 'static/'
+STATIC_URL = '/static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 LOGIN_URL = '/api/auth/login/'
@@ -128,7 +131,7 @@ CORS_ALLOWED_ORIGIN_REGEXES = [
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
-        'rest_framework.authentication.SessionAuthentication',
+        'accounts.authentication.CsrfExemptSessionAuthentication',
     ],
 }
 
@@ -149,3 +152,89 @@ CSRF_TRUSTED_ORIGINS = [
 ]
 
 TALLY_SYNC_API_KEY = 'fc2e1029465c118d144c93a093c0efd2cfa2d40a258c32c8'
+
+JAZZMIN_SETTINGS = {
+    "site_title": "Radhu ERP Admin",
+    "site_header": "Radhu Industries",
+    "site_brand": "RADHU INDUSTRIES",
+    "welcome_sign": "Welcome to Radhu Industries ERP Admin",
+    "copyright": "Radhu Industries Ltd",
+    "search_model": ["stock.TyreItem", "cycletyres.CycleTyreItem", "cycletube.CycleTubeItem"],
+    "user_avatar": None,
+    "topmenu_links": [
+        {"name": "Home", "url": "admin:index", "permissions": ["auth.view_user"]},
+        {"name": "Frontend Live Portal", "url": "https://radhuerp.site", "new_window": True},
+    ],
+    "show_sidebar": True,
+    "navigation_expanded": True,
+    "icons": {
+        "auth": "fas fa-users-cog",
+        "auth.user": "fas fa-user-shield",
+        "auth.Group": "fas fa-users",
+        "accounts.UserProfile": "fas fa-id-badge",
+        "accounts.UserPagePermission": "fas fa-lock",
+        
+        "stock.TyreItem": "fas fa-car",
+        "stock.DailyEntry": "fas fa-clipboard-list",
+        "stock.DailyProductionManualEntry": "fas fa-industry",
+        
+        "cycletyres.CycleTyreItem": "fas fa-bicycle",
+        "cycletyres.CycleTyreEntry": "fas fa-history",
+        "cycletyres.CycleTyreDailyManualEntry": "fas fa-calculator",
+        
+        "cycletube.CycleTubeItem": "fas fa-ring",
+        "cycletube.TubeEntry": "fas fa-clipboard-check",
+        "cycletube.TubeDailyManualEntry": "fas fa-file-invoice",
+        
+        "orders.Order": "fas fa-shopping-cart",
+        "orders.OrderItem": "fas fa-boxes",
+        
+        "hrms.Employee": "fas fa-user-tie",
+        "hrms.Department": "fas fa-building",
+        "hrms.Attendance": "fas fa-calendar-check",
+        "hrms.PieceProduction": "fas fa-cogs",
+        "hrms.Salary": "fas fa-money-bill-wave",
+        
+        "tallysync.TallyRawInvoice": "fas fa-receipt",
+        "tallysync.TallyRawItem": "fas fa-barcode",
+        "tallysync.TallyMapping": "fas fa-link",
+        "tallysync.TallySyncLog": "fas fa-sync",
+        "tallysync.TallySaleInvoice": "fas fa-file-invoice-dollar",
+        "tallysync.TallySaleItem": "fas fa-list-ol",
+        "ai_agent.AiAuditLog": "fas fa-robot",
+    },
+    "default_icon_parents": "fas fa-chevron-circle-right",
+    "default_icon_children": "fas fa-circle",
+}
+
+JAZZMIN_UI_TWEAKS = {
+    "navbar_small_text": False,
+    "footer_small_text": False,
+    "body_small_text": False,
+    "brand_small_text": False,
+    "brand_colour": "navbar-dark",
+    "accent": "accent-primary",
+    "navbar": "navbar-dark navbar-navy",
+    "no_navbar_border": False,
+    "navbar_fixed": False,
+    "layout_boxed": False,
+    "footer_fixed": False,
+    "sidebar_fixed": False,
+    "sidebar": "sidebar-dark-navy",
+    "sidebar_nav_small_text": False,
+    "sidebar_disable_expand": False,
+    "sidebar_nav_child_indent": True,
+    "sidebar_nav_compact_style": False,
+    "sidebar_nav_legacy_style": False,
+    "sidebar_nav_flat_style": False,
+    "theme": "pulse",
+    "dark_mode_theme": "darkly",
+    "button_classes": {
+        "primary": "btn-outline-primary",
+        "secondary": "btn-outline-secondary",
+        "info": "btn-info",
+        "warning": "btn-warning",
+        "danger": "btn-danger",
+        "success": "btn-success"
+    }
+}

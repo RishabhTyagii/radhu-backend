@@ -2,3 +2,7 @@ django>=5.0
 djangorestframework
 django-cors-headers
 openpyxl
+django-jazzmin
+pymysql
+cryptography
+google-generativeai

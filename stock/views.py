@@ -11,67 +11,295 @@ import openpyxl
 from .models import TyreItem, DailyEntry, DailyProductionManualEntry
 from .serializers import TyreItemSerializer, DailyEntrySerializer, DailyProductionManualEntrySerializer
 
+def _recalculate_auto_stocks():
+    for item in TyreItem.objects.all():
+        p1 = DailyEntry.objects.filter(tyre_item=item, entry_type="production", bucket="stock").aggregate(t=Sum("quantity"))["t"] or 0
+        s1 = DailyEntry.objects.filter(tyre_item=item, entry_type="dispatch", bucket="stock").aggregate(t=Sum("quantity"))["t"] or 0
+        a1 = DailyEntry.objects.filter(tyre_item=item, entry_type="adjustment", bucket="stock").aggregate(t=Sum("quantity"))["t"] or 0
+
+        p2 = DailyEntry.objects.filter(tyre_item=item, entry_type="production").aggregate(t=Sum("second_grade"))["t"] or 0
+        s2 = DailyEntry.objects.filter(tyre_item=item, entry_type="dispatch", bucket="second_stock").aggregate(t=Sum("quantity"))["t"] or 0
+        a2 = DailyEntry.objects.filter(tyre_item=item, entry_type="adjustment", bucket="second_stock").aggregate(t=Sum("quantity"))["t"] or 0
+
+        p3 = DailyEntry.objects.filter(tyre_item=item, entry_type="production").aggregate(t=Sum("third_grade"))["t"] or 0
+        s3 = DailyEntry.objects.filter(tyre_item=item, entry_type="dispatch", bucket="third_stock").aggregate(t=Sum("quantity"))["t"] or 0
+        a3 = DailyEntry.objects.filter(tyre_item=item, entry_type="adjustment", bucket="third_stock").aggregate(t=Sum("quantity"))["t"] or 0
+
+        p_rfm = DailyEntry.objects.filter(tyre_item=item, entry_type="production", bucket="rfm_ok_tyre").aggregate(t=Sum("quantity"))["t"] or 0
+        s_rfm = DailyEntry.objects.filter(tyre_item=item, entry_type="dispatch", bucket="rfm_ok_tyre").aggregate(t=Sum("quantity"))["t"] or 0
+        a_rfm = DailyEntry.objects.filter(tyre_item=item, entry_type="adjustment", bucket="rfm_ok_tyre").aggregate(t=Sum("quantity"))["t"] or 0
+
+        item.stock = p1 - s1 + a1
+        item.second_stock = p2 - s2 + a2
+        item.third_stock = p3 - s3 + a3
+        item.rfm_ok_tyre = p_rfm - s_rfm + a_rfm
+        item.save(update_fields=["stock", "second_stock", "third_stock", "rfm_ok_tyre"])
+
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def dashboard(request):
-    q = request.GET.get("q", "")
-    items = TyreItem.objects.filter(is_active=True)
-    if q:
-        items = items.filter(Q(tyre__icontains=q) | Q(pattern__icontains=q) | Q(type__icontains=q))
+    _recalculate_auto_stocks()
 
     today = datetime.date.today()
-    month_start = today.replace(day=1)
+    start_date_param = request.query_params.get("start_date", "").strip()
+    end_date_param = request.query_params.get("end_date", "").strip()
+    month_param = request.query_params.get("month", "").strip()
 
-    today_production = DailyEntry.objects.filter(entry_type="production", date=today).aggregate(Sum("quantity"))['quantity__sum'] or 0
-    today_dispatch = DailyEntry.objects.filter(entry_type="dispatch", date=today).aggregate(Sum("quantity"))['quantity__sum'] or 0
-    
-    grand_total = 0
-    total_stock_col = 0
-    total_repair = 0
-    total_rfm = 0
-    total_old = 0
-    total_hold = 0
-    total_curing = 0
-    total_despatch = 0
+    filter_start = None
+    filter_end = None
+    is_filtered_range = False
 
-    response_items = []
+    if start_date_param and end_date_param:
+        try:
+            filter_start = datetime.datetime.strptime(start_date_param, "%Y-%m-%d").date()
+            filter_end = datetime.datetime.strptime(end_date_param, "%Y-%m-%d").date()
+            is_filtered_range = True
+        except ValueError:
+            pass
+
+    if not is_filtered_range:
+        if not month_param:
+            month_param = f"{today.year}-{today.month:02d}"
+
+        if month_param != "all":
+            try:
+                parts = month_param.split("-")
+                year, month = int(parts[0]), int(parts[1])
+                filter_start = datetime.date(year, month, 1)
+                if month == 12:
+                    filter_end = datetime.date(year + 1, 1, 1) - datetime.timedelta(days=1)
+                else:
+                    filter_end = datetime.date(year, month + 1, 1) - datetime.timedelta(days=1)
+                is_filtered_range = True
+            except (ValueError, IndexError):
+                month_param = "all"
+                is_filtered_range = False
+
+    items = TyreItem.objects.filter(is_active=True)
+    items_data = []
+
+    tot_prev_first = 0
+    tot_prev_second = 0
+    tot_prev_third = 0
+    tot_prod_total = 0
+    tot_prod_first = 0
+    tot_prod_second = 0
+    tot_prod_third = 0
+    tot_sale_first = 0
+    tot_sale_second = 0
+    tot_sale_third = 0
+    tot_rfm = 0
+    tot_closing_first = 0
+    tot_closing_second = 0
+    tot_closing_third = 0
+    tot_total_closing = 0
+
     for item in items:
-        month_curing = DailyEntry.objects.filter(tyre_item=item, entry_type="production", date__gte=month_start, date__lte=today).aggregate(Sum("all_curing"))['all_curing__sum'] or 0
-        month_despatch = DailyEntry.objects.filter(tyre_item=item, entry_type="dispatch", date__gte=month_start, date__lte=today).aggregate(Sum("quantity"))['quantity__sum'] or 0
-        
+        if is_filtered_range and filter_start and filter_end:
+            # Previous closing (before start date)
+            p1_prev = DailyEntry.objects.filter(
+                tyre_item=item, entry_type="production", bucket="stock", date__lt=filter_start
+            ).aggregate(t=Sum("quantity"))["t"] or 0
+            s1_prev = DailyEntry.objects.filter(
+                tyre_item=item, entry_type="dispatch", bucket="stock", date__lt=filter_start
+            ).aggregate(t=Sum("quantity"))["t"] or 0
+            a1_prev = DailyEntry.objects.filter(
+                tyre_item=item, entry_type="adjustment", bucket="stock", date__lt=filter_start
+            ).aggregate(t=Sum("quantity"))["t"] or 0
+
+            p2_prev = DailyEntry.objects.filter(
+                tyre_item=item, entry_type="production", date__lt=filter_start
+            ).aggregate(t=Sum("second_grade"))["t"] or 0
+            s2_prev = DailyEntry.objects.filter(
+                tyre_item=item, entry_type="dispatch", bucket="second_stock", date__lt=filter_start
+            ).aggregate(t=Sum("quantity"))["t"] or 0
+            a2_prev = DailyEntry.objects.filter(
+                tyre_item=item, entry_type="adjustment", bucket="second_stock", date__lt=filter_start
+            ).aggregate(t=Sum("quantity"))["t"] or 0
+
+            p3_prev = DailyEntry.objects.filter(
+                tyre_item=item, entry_type="production", date__lt=filter_start
+            ).aggregate(t=Sum("third_grade"))["t"] or 0
+            s3_prev = DailyEntry.objects.filter(
+                tyre_item=item, entry_type="dispatch", bucket="third_stock", date__lt=filter_start
+            ).aggregate(t=Sum("quantity"))["t"] or 0
+            a3_prev = DailyEntry.objects.filter(
+                tyre_item=item, entry_type="adjustment", bucket="third_stock", date__lt=filter_start
+            ).aggregate(t=Sum("quantity"))["t"] or 0
+
+            prev_first = p1_prev - s1_prev + a1_prev
+            prev_second = p2_prev - s2_prev + a2_prev
+            prev_third = p3_prev - s3_prev + a3_prev
+
+            # In-range production
+            range_prod = DailyEntry.objects.filter(
+                tyre_item=item, entry_type="production", date__gte=filter_start, date__lte=filter_end
+            )
+            p1_range = range_prod.filter(bucket="stock").aggregate(t=Sum("quantity"))["t"] or 0
+            p2_range = range_prod.aggregate(t=Sum("second_grade"))["t"] or 0
+            p3_range = range_prod.aggregate(t=Sum("third_grade"))["t"] or 0
+
+            # In-range sales / dispatches
+            s1_range = DailyEntry.objects.filter(
+                tyre_item=item, entry_type="dispatch", bucket="stock", date__gte=filter_start, date__lte=filter_end
+            ).aggregate(t=Sum("quantity"))["t"] or 0
+            s2_range = DailyEntry.objects.filter(
+                tyre_item=item, entry_type="dispatch", bucket="second_stock", date__gte=filter_start, date__lte=filter_end
+            ).aggregate(t=Sum("quantity"))["t"] or 0
+            s3_range = DailyEntry.objects.filter(
+                tyre_item=item, entry_type="dispatch", bucket="third_stock", date__gte=filter_start, date__lte=filter_end
+            ).aggregate(t=Sum("quantity"))["t"] or 0
+
+            # In-range adjustments
+            a1_range = DailyEntry.objects.filter(
+                tyre_item=item, entry_type="adjustment", bucket="stock", date__gte=filter_start, date__lte=filter_end
+            ).aggregate(t=Sum("quantity"))["t"] or 0
+            a2_range = DailyEntry.objects.filter(
+                tyre_item=item, entry_type="adjustment", bucket="second_stock", date__gte=filter_start, date__lte=filter_end
+            ).aggregate(t=Sum("quantity"))["t"] or 0
+            a3_range = DailyEntry.objects.filter(
+                tyre_item=item, entry_type="adjustment", bucket="third_stock", date__gte=filter_start, date__lte=filter_end
+            ).aggregate(t=Sum("quantity"))["t"] or 0
+
+            closing_first = prev_first + p1_range - s1_range + a1_range
+            closing_second = prev_second + p2_range - s2_range + a2_range
+            closing_third = prev_third + p3_range - s3_range + a3_range
+            rfm = item.rfm_ok_tyre
+            total_closing = closing_first + closing_second + closing_third + rfm
+
+            prod_first = p1_range
+            prod_second = p2_range
+            prod_third = p3_range
+            prod_total = p1_range + p2_range + p3_range
+
+            sale_first = s1_range
+            sale_second = s2_range
+            sale_third = s3_range
+
+        else:
+            # All time
+            prev_first = 0
+            prev_second = 0
+            prev_third = 0
+
+            all_prod = DailyEntry.objects.filter(tyre_item=item, entry_type="production")
+            prod_first = all_prod.filter(bucket="stock").aggregate(t=Sum("quantity"))["t"] or 0
+            prod_second = all_prod.aggregate(t=Sum("second_grade"))["t"] or 0
+            prod_third = all_prod.aggregate(t=Sum("third_grade"))["t"] or 0
+            prod_total = prod_first + prod_second + prod_third
+
+            sale_first = DailyEntry.objects.filter(tyre_item=item, entry_type="dispatch", bucket="stock").aggregate(t=Sum("quantity"))["t"] or 0
+            sale_second = DailyEntry.objects.filter(tyre_item=item, entry_type="dispatch", bucket="second_stock").aggregate(t=Sum("quantity"))["t"] or 0
+            sale_third = DailyEntry.objects.filter(tyre_item=item, entry_type="dispatch", bucket="third_stock").aggregate(t=Sum("quantity"))["t"] or 0
+
+            closing_first = item.stock
+            closing_second = item.second_stock
+            closing_third = item.third_stock
+            rfm = item.rfm_ok_tyre
+            total_closing = closing_first + closing_second + closing_third + rfm
+
         serialized = TyreItemSerializer(item).data
-        serialized["month_curing"] = month_curing
-        serialized["month_despatch"] = month_despatch
-        response_items.append(serialized)
+        serialized.update({
+            "prev_closing_first": prev_first,
+            "prev_closing_second": prev_second,
+            "prev_closing_third": prev_third,
+            "month_prod_total": prod_total,
+            "month_prod_first": prod_first,
+            "month_prod_second": prod_second,
+            "month_prod_third": prod_third,
+            "month_sale_first": sale_first,
+            "month_sale_second": sale_second,
+            "month_sale_third": sale_third,
+            "rfm_ok_tyre": rfm,
+            "closing_first": closing_first,
+            "closing_second": closing_second,
+            "closing_third": closing_third,
+            "total_closing": total_closing,
+        })
+        items_data.append(serialized)
 
-        grand_total += item.total_stock
-        total_stock_col += item.stock
-        total_repair += item.repair_tyre_stock
-        total_rfm += item.rfm_ok_tyre
-        total_old += item.old_tyres_2025
-        total_hold += item.on_hold_export
-        total_curing += month_curing
-        total_despatch += month_despatch
+        tot_prev_first += prev_first
+        tot_prev_second += prev_second
+        tot_prev_third += prev_third
+        tot_prod_total += prod_total
+        tot_prod_first += prod_first
+        tot_prod_second += prod_second
+        tot_prod_third += prod_third
+        tot_sale_first += sale_first
+        tot_sale_second += sale_second
+        tot_sale_third += sale_third
+        tot_rfm += rfm
+        tot_closing_first += closing_first
+        tot_closing_second += closing_second
+        tot_closing_third += closing_third
+        tot_total_closing += total_closing
 
-    month_production = total_curing
-    month_dispatch = total_despatch
+    # Available months list
+    entry_dates = DailyEntry.objects.dates("date", "month", order="DESC")
+    month_set = set()
+    available_months = [{"value": "all", "label": "All Time / Overall"}]
+
+    standard_months = [
+        ("2026-08", "August 2026"),
+        ("2026-07", "July 2026"),
+        ("2026-06", "June 2026"),
+        ("2026-05", "May 2026"),
+        ("2026-04", "April 2026"),
+    ]
+    for val, lbl in standard_months:
+        available_months.append({"value": val, "label": lbl})
+        month_set.add(val)
+
+    for ed in entry_dates:
+        val = f"{ed.year}-{ed.month:02d}"
+        if val not in month_set:
+            lbl = ed.strftime("%B %Y")
+            available_months.append({"value": val, "label": lbl})
+            month_set.add(val)
+
+    today_prod_all = DailyEntry.objects.filter(entry_type="production", date=today).aggregate(
+        q=Sum("quantity"), s=Sum("second_grade"), t=Sum("third_grade")
+    )
+    today_prod_count = (today_prod_all["q"] or 0) + (today_prod_all["s"] or 0) + (today_prod_all["t"] or 0)
+    today_disp_count = DailyEntry.objects.filter(entry_type="dispatch", date=today).aggregate(Sum("quantity"))["quantity__sum"] or 0
 
     return Response({
-        "items": response_items,
-        "today_production": today_production,
-        "today_dispatch": today_dispatch,
-        "month_production": month_production,
-        "month_dispatch": month_dispatch,
+        "selected_month": month_param or "custom",
+        "start_date": str(filter_start) if filter_start else None,
+        "end_date": str(filter_end) if filter_end else None,
+        "available_months": available_months,
+        "stats": {
+            "today_production": today_prod_count,
+            "today_dispatch": today_disp_count,
+            "month_prod_total": tot_prod_total,
+            "month_prod_first": tot_prod_first,
+            "month_prod_second": tot_prod_second,
+            "month_prod_third": tot_prod_third,
+            "month_sale_first": tot_sale_first,
+            "closing_first": tot_closing_first,
+            "closing_second": tot_closing_second,
+            "closing_third": tot_closing_third,
+            "total_closing": tot_total_closing,
+        },
         "totals": {
-            "grand_total": grand_total,
-            "stock": total_stock_col,
-            "repair": total_repair,
-            "rfm": total_rfm,
-            "old": total_old,
-            "hold": total_hold,
-            "curing": total_curing,
-            "despatch": total_despatch,
-        }
+            "prev_closing_first": tot_prev_first,
+            "prev_closing_second": tot_prev_second,
+            "prev_closing_third": tot_prev_third,
+            "month_prod_total": tot_prod_total,
+            "month_prod_first": tot_prod_first,
+            "month_prod_second": tot_prod_second,
+            "month_prod_third": tot_prod_third,
+            "month_sale_first": tot_sale_first,
+            "month_sale_second": tot_sale_second,
+            "month_sale_third": tot_sale_third,
+            "rfm_ok_tyre": tot_rfm,
+            "closing_first": tot_closing_first,
+            "closing_second": tot_closing_second,
+            "closing_third": tot_closing_third,
+            "total_closing": tot_total_closing,
+        },
+        "items": items_data,
     })
 
 @api_view(["POST"])
@@ -113,7 +341,9 @@ def add_production(request):
 
     with transaction.atomic():
         item.stock += packing
-        item.save(update_fields=["stock"])
+        item.second_stock += second_grade
+        item.third_stock += third_grade
+        item.save(update_fields=["stock", "second_stock", "third_stock"])
 
         entry = DailyEntry.objects.create(
             tyre_item=item,

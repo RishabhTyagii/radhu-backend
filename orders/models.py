@@ -6,13 +6,12 @@ from cycletyres.models import CycleTyreItem
 
 
 class Party(models.Model):
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='parties')
-    name = models.CharField(max_length=200)
+    user = models.ForeignKey(User, null=True, blank=True, on_delete=models.CASCADE, related_name='parties')
+    name = models.CharField(max_length=200, unique=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ['name']
-        unique_together = ('user', 'name')
 
     def __str__(self):
         return self.name
@@ -75,9 +74,10 @@ class OrderItem(models.Model):
     cycle_tyre_item = models.ForeignKey(CycleTyreItem, null=True, blank=True, on_delete=models.CASCADE, related_name='order_items')
 
     quantity = models.IntegerField()
+    price = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
 
     def __str__(self):
-        return f"{self.quantity} x {self.item_display}"
+        return f"{self.quantity} x {self.item_display} @ ₹{self.price}"
 
     @property
     def item_display(self):

@@ -12,6 +12,7 @@ class CycleTyreItem(models.Model):
     weight = models.DecimalField("Weight (Kg)", max_digits=8, decimal_places=3, default=Decimal("0.000"))
     stock = models.IntegerField("STOCK (1st Grade / Black)", default=0)
     second_stock = models.IntegerField("2nd Grade Stock", default=0)
+    rejected_stock = models.IntegerField("Rejected / C-Grade Stock", default=0)
     rfm_stock = models.IntegerField("R.F.M. Stock", default=0)
 
     is_active = models.BooleanField(default=True)

@@ -53,8 +53,10 @@ class TallyInvoice(models.Model):
     igst = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     total_value = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     stock_synced = models.BooleanField(default=False, help_text="True if all line items matched & stock was reduced")
+    voucher_type = models.CharField(max_length=30, default="Sales", blank=True)
     raw_payload = models.TextField(blank=True)
     synced_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ["-voucher_date", "-synced_at"]
@@ -113,3 +115,34 @@ class TallyPendingItem(models.Model):
     def __str__(self):
         status = "resolved" if self.resolved else "PENDING"
         return f"{self.tally_item_name} x{self.qty} ({self.get_reason_display()}) - {status}"
+
+
+class TallyInvoiceLine(models.Model):
+    invoice = models.ForeignKey(TallyInvoice, on_delete=models.CASCADE, related_name="lines")
+    tally_item_name = models.CharField(max_length=200)
+    qty = models.IntegerField(default=0)
+    rate = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    mapped_module = models.CharField(max_length=15, blank=True)
+    mapped_item_id = models.PositiveIntegerField(null=True, blank=True)
+    stock_applied = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["id"]
+
+    def __str__(self):
+        return f"{self.tally_item_name} x{self.qty}"
+
+
+class TallyWebhookEvent(models.Model):
+    received_at = models.DateTimeField(auto_now_add=True)
+    status = models.CharField(max_length=20, default="ok")
+    voucher_count = models.IntegerField(default=0)
+    message = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-received_at"]
+
+    def __str__(self):
+        return f"{self.received_at} {self.status} x{self.voucher_count}"
