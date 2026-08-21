@@ -323,6 +323,24 @@ def _build_system_context():
                 "qty": oi.quantity,
                 "price": float(oi.price or 0),
             })
+        party_order_totals = defaultdict(lambda: {"order_count": 0, "total_qty": 0, "items": defaultdict(int)})
+        for oi in OrderItem.objects.select_related("order", "order__party").all():
+            if oi.order and oi.order.party:
+                pname = oi.order.party.name
+                party_order_totals[pname]["order_count"] += 1
+                party_order_totals[pname]["total_qty"] += oi.quantity
+                item_name = oi.item_display or "Unknown"
+                party_order_totals[pname]["items"][item_name] += oi.quantity
+
+        party_order_breakdown = []
+        for pname, pdata in sorted(party_order_totals.items(), key=lambda x: x[1]["total_qty"], reverse=True)[:35]:
+            party_order_breakdown.append({
+                "party": pname,
+                "order_count": pdata["order_count"],
+                "total_pcs": pdata["total_qty"],
+                "top_items": [{"item": it, "pcs": q} for it, q in sorted(pdata["items"].items(), key=lambda x: x[1], reverse=True)[:8]],
+            })
+
         snapshot["orders"] = {
             "party_count": Party.objects.count(),
             "pending": pending,
@@ -330,6 +348,7 @@ def _build_system_context():
             "parties": parties,
             "recent_orders": orders,
             "recent_order_items": recent_items,
+            "party_orders_breakdown": party_order_breakdown,
         }
     except Exception as e:
         snapshot["errors"].append(f"orders: {e}")
@@ -348,18 +367,68 @@ def _build_system_context():
             invoices=Count("id"),
             total=Sum("total_value"),
         )
-        tally_map = defaultdict(lambda: {"invoices": 0, "total": Decimal("0")})
-        for inv in tally_qs.only("party_name", "total_value"):
+
+        tally_parties_map = defaultdict(lambda: {
+            "invoices": 0,
+            "total_value": Decimal("0"),
+            "total_pcs": 0,
+            "items_bought": defaultdict(lambda: {"qty": 0, "amount": Decimal("0")}),
+            "location": "",
+            "gstin": "",
+        })
+        top_selling_items = defaultdict(lambda: {"qty": 0, "amount": Decimal("0"), "parties": set()})
+
+        for inv in tally_qs.only("party_name", "total_value", "raw_payload", "place_of_supply", "state_name", "party_gstin"):
             pname = (inv.party_name or "").strip()
-            if pname:
-                tally_map[pname]["invoices"] += 1
-                tally_map[pname]["total"] += inv.total_value or 0
-        tally_parties = [
-            {"party": k, "invoices": v["invoices"], "total": float(v["total"])}
-            for k, v in sorted(
-                tally_map.items(), key=lambda x: x[1]["total"], reverse=True
-            )[:30]
+            if not pname:
+                continue
+            p = tally_parties_map[pname]
+            p["invoices"] += 1
+            p["total_value"] += (inv.total_value or Decimal("0"))
+            if not p["location"]:
+                p["location"] = inv.place_of_supply or inv.state_name or ""
+            if not p["gstin"] and inv.party_gstin:
+                p["gstin"] = inv.party_gstin
+
+            if inv.raw_payload:
+                try:
+                    payload = json.loads(inv.raw_payload) if isinstance(inv.raw_payload, str) else inv.raw_payload
+                    for it in payload.get("items", []):
+                        it_name = (it.get("name") or "").strip()
+                        qty = int(it.get("qty", 0) or 0)
+                        amt = Decimal(str(it.get("amount", 0) or 0))
+                        if it_name:
+                            p["items_bought"][it_name]["qty"] += qty
+                            p["items_bought"][it_name]["amount"] += amt
+                            p["total_pcs"] += qty
+
+                            top_selling_items[it_name]["qty"] += qty
+                            top_selling_items[it_name]["amount"] += amt
+                            top_selling_items[it_name]["parties"].add(pname)
+                except Exception:
+                    pass
+
+        tally_parties = []
+        for pname, pdata in sorted(tally_parties_map.items(), key=lambda x: x[1]["total_value"], reverse=True)[:50]:
+            items_list = [
+                {"item": it_name, "pcs": idata["qty"], "amount": float(idata["amount"])}
+                for it_name, idata in sorted(pdata["items_bought"].items(), key=lambda x: x[1]["qty"], reverse=True)[:10]
+            ]
+            tally_parties.append({
+                "party": pname,
+                "invoices": pdata["invoices"],
+                "total_pcs": pdata["total_pcs"],
+                "total_amount": float(pdata["total_value"]),
+                "location": pdata["location"],
+                "gstin": pdata["gstin"],
+                "items_breakdown": items_list,
+            })
+
+        overall_top_items = [
+            {"item": it_name, "total_pcs": idata["qty"], "total_amount": float(idata["amount"]), "buyer_count": len(idata["parties"])}
+            for it_name, idata in sorted(top_selling_items.items(), key=lambda x: x[1]["qty"], reverse=True)[:35]
         ]
+
         recent_inv = list(
             TallyInvoice.objects.order_by("-voucher_date", "-id")[:15].values(
                 "voucher_number", "voucher_date", "party_name", "total_value",
@@ -370,6 +439,7 @@ def _build_system_context():
             "this_month": month_agg,
             "last_7_days": week_agg,
             "top_parties": tally_parties,
+            "top_selling_items_overall": overall_top_items,
             "recent_invoices": recent_inv,
         }
     except Exception as e:
@@ -410,6 +480,8 @@ LIVE ERP SNAPSHOT (JSON):
 
 RULES:
 - Answer using THIS snapshot first. If data is missing, say so clearly instead of inventing numbers.
+- You HAVE EXACT party-wise item breakdown and piece counts (pcs) in `tally.top_parties` (under `items_breakdown` with item name, pcs, and amount) and `orders.party_orders_breakdown`. When asked about any party/dealer's items, orders, or quantity, ALWAYS provide the exact item names, pieces (pcs), and billing amounts from this data!
+- You also HAVE `tally.top_selling_items_overall` for all-time top selling items by pieces across the factory.
 - Cover Auto Tyre, Cycle Tyre, Cycle Tube, Orders, Tally billing/GST, HRMS.
 - Match the user's language (Hindi, English, or Hinglish).
 - Be concise and practical. Use Indian number style (₹, lakhs, crores).
