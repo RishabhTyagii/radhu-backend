@@ -66,29 +66,31 @@ class AiAuditLog(models.Model):
 
 class AiConfig(models.Model):
     MODEL_CHOICES = [
-        ("gemini-2.5-flash", "Gemini 2.5 Flash (Recommended — Fastest & Smartest)"),
-        ("gemini-2.0-flash", "Gemini 2.0 Flash (Fast & High Volume)"),
-        ("gemini-1.5-flash", "Gemini 1.5 Flash (Stable & Highly Compatible)"),
-        ("gemini-1.5-pro", "Gemini 1.5 Pro (Deep Reasoning & Large Analysis)"),
+        ("gemini-3.7-flash", "Gemini 3.7 Flash (Recommended — Latest, Fastest & Smartest)"),
+        ("gemini-3.6-flash", "Gemini 3.6 Flash (High Performance & Stable)"),
+        ("gemini-3.5-flash", "Gemini 3.5 Flash (Ultra Fast & Efficient)"),
+        ("gemini-3.5-flash-lite", "Gemini 3.5 Flash Lite (Lightweight & Low Latency)"),
+        ("gemini-flash-latest", "Gemini Flash Latest (Auto-updates to latest Flash)"),
+        ("gemini-3.1-pro-preview", "Gemini 3.1 Pro (Deep Complex Reasoning)"),
     ]
 
     api_key = models.CharField(
         max_length=255,
         blank=True,
-        help_text="Google AI Studio Gemini API Key (e.g. AIzaSy...). Rotate/update anytime here.",
+        help_text="Google AI Studio Gemini API Key (e.g. AQ.Ab... or AIzaSy...). Rotate/update anytime here.",
         verbose_name="Gemini API Key",
     )
     model_name = models.CharField(
         max_length=50,
         choices=MODEL_CHOICES,
-        default="gemini-2.5-flash",
+        default="gemini-3.7-flash",
         help_text="Primary model used by the AI Agent.",
         verbose_name="Active AI Model",
     )
     fallback_model = models.CharField(
         max_length=50,
         choices=MODEL_CHOICES,
-        default="gemini-1.5-flash",
+        default="gemini-3.6-flash",
         help_text="Secondary model used automatically if the primary model hits quota/rate limits.",
         verbose_name="Fallback Model",
     )

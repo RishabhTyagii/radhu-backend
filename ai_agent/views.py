@@ -34,8 +34,8 @@ def _get_effective_ai_config():
         from .models import AiConfig
         cfg = AiConfig.get_solo()
         api_key = (cfg.api_key or "").strip() or os.environ.get("GEMINI_API_KEY", "").strip()
-        primary_model = (cfg.model_name or "").strip() or "gemini-2.5-flash"
-        fallback_model = (cfg.fallback_model or "").strip() or "gemini-1.5-flash"
+        primary_model = (cfg.model_name or "").strip() or "gemini-3.7-flash"
+        fallback_model = (cfg.fallback_model or "").strip() or "gemini-3.6-flash"
         is_enabled = bool(cfg.is_enabled)
         temp = float(cfg.temperature) if cfg.temperature is not None else 0.4
         extra = (cfg.system_instructions_extra or "").strip()
@@ -50,8 +50,8 @@ def _get_effective_ai_config():
     except Exception:
         return {
             "api_key": os.environ.get("GEMINI_API_KEY", "").strip(),
-            "primary_model": os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash",
-            "fallback_model": "gemini-1.5-flash",
+            "primary_model": os.environ.get("GEMINI_MODEL", "gemini-3.7-flash").strip() or "gemini-3.7-flash",
+            "fallback_model": "gemini-3.6-flash",
             "is_enabled": True,
             "temperature": 0.4,
             "extra_instructions": "",
@@ -419,7 +419,7 @@ RULES:
 - When the user wants to add/delete/import/production/sale/dispatch/adjust, end your reply with ONE fenced block:
 
 ```radhu_action
-{"actions":[{"action":"add_item","module":"cycle_tyre","size":"26x1.75","box_type":"BOX","material":"Nylon","brand":"RADHU"}]}
+{{"actions":[{{"action":"add_item","module":"cycle_tyre","size":"26x1.75","box_type":"BOX","material":"Nylon","brand":"RADHU"}}]}}
 ```
 
 Allowed action: add_item, delete_item, add_production, add_sale, add_dispatch, add_adjustment, import_items, import_production.
@@ -526,7 +526,7 @@ def _send_gemini(history, parts):
     models_to_try = [config["primary_model"]]
     if config["fallback_model"] and config["fallback_model"] not in models_to_try:
         models_to_try.append(config["fallback_model"])
-    for default_m in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]:
+    for default_m in ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-flash-latest", "gemini-3.1-pro-preview"]:
         if default_m not in models_to_try:
             models_to_try.append(default_m)
 
