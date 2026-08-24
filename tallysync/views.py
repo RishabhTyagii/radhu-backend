@@ -207,6 +207,24 @@ def tally_webhook(request):
     party_name = str(payload.get("party_name", "")).strip()
     items = payload.get("items", [])
 
+    cgst_val = _to_decimal(payload.get("cgst"))
+    sgst_val = _to_decimal(payload.get("sgst"))
+    igst_val = _to_decimal(payload.get("igst"))
+    total_val = _to_decimal(payload.get("total_value"))
+    taxable_val = _to_decimal(payload.get("taxable_value"))
+    gst_total = cgst_val + sgst_val + igst_val
+
+    items_sum = Decimal("0")
+    for line in items:
+        items_sum += _to_decimal(line.get("amount", 0))
+
+    if items_sum > 0:
+        taxable_val = items_sum
+    elif (taxable_val == total_val and gst_total > 0) or taxable_val <= 0:
+        taxable_val = max(total_val - gst_total, Decimal("0"))
+
+    payload["taxable_value"] = float(taxable_val)
+
     invoice = TallyInvoice.objects.create(
         voucher_number=voucher_number,
         voucher_date=voucher_date,
@@ -218,11 +236,11 @@ def tally_webhook(request):
         place_of_supply=str(payload.get("place_of_supply", "")).strip(),
         state_name=str(payload.get("state_name", "")).strip(),
         gst_registration_type=str(payload.get("gst_registration_type", "")).strip(),
-        taxable_value=_to_decimal(payload.get("taxable_value")),
-        cgst=_to_decimal(payload.get("cgst")),
-        sgst=_to_decimal(payload.get("sgst")),
-        igst=_to_decimal(payload.get("igst")),
-        total_value=_to_decimal(payload.get("total_value")),
+        taxable_value=taxable_val,
+        cgst=cgst_val,
+        sgst=sgst_val,
+        igst=igst_val,
+        total_value=total_val,
         raw_payload=json.dumps(payload, indent=2),
     )
 
