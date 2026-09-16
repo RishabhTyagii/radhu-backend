@@ -122,7 +122,7 @@ class Production(models.Model):
     date = models.DateField(db_index=True)
     product_name = models.CharField(max_length=150)
     quantity = models.DecimalField(max_digits=12, decimal_places=2)
-    rate = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    rate = models.DecimalField(max_digits=10, decimal_places=6, default=0)
     total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     remarks = models.TextField(blank=True)
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="hrms_productions")
