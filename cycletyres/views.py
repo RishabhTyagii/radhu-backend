@@ -95,6 +95,7 @@ def dashboard(request):
     tot_month_prod_total = 0
     tot_month_prod_first = 0
     tot_month_prod_second = 0
+    tot_month_prod_rejected = 0
     tot_month_sale_first = 0
     tot_rfm_stock = 0
     tot_closing_first = 0
@@ -134,11 +135,13 @@ def dashboard(request):
             )
             p1_month = range_prod_entries.aggregate(t=Sum("first_grade"))["t"] or 0
             p2_month = range_prod_entries.aggregate(t=Sum("second_grade"))["t"] or 0
+            p_rej_month = range_prod_entries.aggregate(t=Sum("rejected_grade"))["t"] or 0
+            p_curing_month = range_prod_entries.aggregate(t=Sum("all_curing"))["t"] or 0
 
-            # Strictly 1st + 2nd
             month_prod_first = p1_month
             month_prod_second = p2_month
-            month_prod_total = p1_month + p2_month
+            month_prod_rejected = p_rej_month
+            month_prod_total = p_curing_month if p_curing_month > 0 else (p1_month + p2_month + p_rej_month)
 
             s1_month = CycleTyreEntry.objects.filter(
                 tyre_item=item, entry_type="sale", bucket="stock", date__gte=filter_start, date__lte=filter_end
@@ -169,10 +172,13 @@ def dashboard(request):
             prod_entries = CycleTyreEntry.objects.filter(tyre_item=item, entry_type="production")
             p1 = prod_entries.aggregate(t=Sum("first_grade"))["t"] or 0
             p2 = prod_entries.aggregate(t=Sum("second_grade"))["t"] or 0
+            p_rej = prod_entries.aggregate(t=Sum("rejected_grade"))["t"] or 0
+            p_curing = prod_entries.aggregate(t=Sum("all_curing"))["t"] or 0
 
             month_prod_first = p1
             month_prod_second = p2
-            month_prod_total = p1 + p2
+            month_prod_rejected = p_rej
+            month_prod_total = p_curing if p_curing > 0 else (p1 + p2 + p_rej)
 
             month_sale_first = CycleTyreEntry.objects.filter(
                 tyre_item=item, entry_type="sale", bucket="stock"
@@ -190,6 +196,7 @@ def dashboard(request):
             "month_prod_total": month_prod_total,
             "month_prod_first": month_prod_first,
             "month_prod_second": month_prod_second,
+            "month_prod_rejected": month_prod_rejected,
             "month_sale_first": month_sale_first,
             "rfm_stock": rfm,
             "closing_first": closing_first,
@@ -203,6 +210,7 @@ def dashboard(request):
         tot_month_prod_total += month_prod_total
         tot_month_prod_first += month_prod_first
         tot_month_prod_second += month_prod_second
+        tot_month_prod_rejected += month_prod_rejected
         tot_month_sale_first += month_sale_first
         tot_rfm_stock += rfm
         tot_closing_first += closing_first
@@ -244,6 +252,7 @@ def dashboard(request):
             "month_prod_total": tot_month_prod_total,
             "month_prod_first": tot_month_prod_first,
             "month_prod_second": tot_month_prod_second,
+            "month_prod_rejected": tot_month_prod_rejected,
             "month_sale_first": tot_month_sale_first,
             "closing_first": tot_closing_first,
             "closing_second": tot_closing_second,
@@ -255,6 +264,7 @@ def dashboard(request):
             "month_prod_total": tot_month_prod_total,
             "month_prod_first": tot_month_prod_first,
             "month_prod_second": tot_month_prod_second,
+            "month_prod_rejected": tot_month_prod_rejected,
             "month_sale_first": tot_month_sale_first,
             "rfm_stock": tot_rfm_stock,
             "closing_first": tot_closing_first,
