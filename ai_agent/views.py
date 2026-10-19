@@ -665,15 +665,15 @@ def _send_gemini(history, parts):
 
     safe_history = _history_for_gemini(history)
 
-    # Build model priority order based on admin selection and quota stability
-    models_to_try = []
-    if config.get("primary_model"):
-        models_to_try.append(config["primary_model"])
-    if config.get("fallback_model") and config["fallback_model"] not in models_to_try:
-        models_to_try.append(config["fallback_model"])
-    for default_m in ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.8-flash", "gemini-flash-latest"]:
-        if default_m not in models_to_try:
-            models_to_try.append(default_m)
+    # Build model priority order: prioritize models with active available quota first
+    models_to_try = [
+        "gemini-3.1-flash-lite",
+        "gemini-3.5-flash-lite",
+        "gemini-3.7-flash",
+        "gemini-3.6-flash",
+    ]
+    if config.get("primary_model") and config["primary_model"] not in models_to_try and "3.8" not in config["primary_model"]:
+        models_to_try.insert(0, config["primary_model"])
 
     last_error = None
     for model_name in models_to_try:

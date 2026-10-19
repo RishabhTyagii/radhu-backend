@@ -511,6 +511,10 @@ def describe_table_columns(table_name: str) -> str:
             rows = cursor.fetchall()
             res = [dict(zip(cols, r)) for r in rows]
             return json.dumps({"table": clean_table, "columns": res})
+    except Exception as e:
+        return json.dumps({"error": f"Failed to describe table '{clean_table}': {str(e)}"})
+
+
 def learn_and_remember(key: str, content: str, category: str = "general") -> str:
     """Permanently teaches and saves a new fact, user preference, calculation formula, business rule, or correction into Radhu AI's continuous training memory.
     Call this tool whenever the user teaches you something new, clarifies an ERP process, corrects a previous answer, or asks you to remember something.
