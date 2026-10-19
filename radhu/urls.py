@@ -13,6 +13,7 @@ urlpatterns = [
     path('api/orders/', include('orders.urls')),
     path('api/accounts/', include('accounts.urls')),
     path('api/ai/', include('ai_agent.urls')),
+    path('api/rawmaterial/', include('rawmaterial.urls')),
 ]
 
 admin.site.site_header = "Radhu Industries ERP Admin"

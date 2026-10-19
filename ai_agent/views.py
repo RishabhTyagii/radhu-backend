@@ -179,9 +179,12 @@ def _history_for_gemini(raw_history):
         role = getattr(item, "role", None) or "user"
         texts = []
         for p in getattr(item, "parts", []) or []:
-            text = getattr(p, "text", None)
-            if text:
-                texts.append(text)
+            try:
+                text = getattr(p, "text", None)
+                if text and isinstance(text, str) and text.strip():
+                    texts.append(text)
+            except Exception:
+                continue
         if texts:
             out.append({"role": role, "parts": texts})
     return out
@@ -409,6 +412,32 @@ def _build_system_context():
                 except Exception:
                     pass
 
+        # Build per-party invoice list with voucher_number, date, pcs, amount
+        tally_party_invoices_map = defaultdict(list)
+        for inv in tally_qs.only(
+            "party_name", "voucher_number", "voucher_date", "total_value", "raw_payload"
+        ).order_by("-voucher_date"):
+            pname = (inv.party_name or "").strip()
+            if not pname:
+                continue
+            try:
+                payload = json.loads(inv.raw_payload) if isinstance(inv.raw_payload, str) else (inv.raw_payload or {})
+                bill_pcs = sum(int(it.get("qty", 0) or 0) for it in payload.get("items", []))
+                bill_items = [
+                    {"item": (it.get("name") or "").strip(), "pcs": int(it.get("qty", 0) or 0)}
+                    for it in payload.get("items", []) if (it.get("name") or "").strip()
+                ]
+            except Exception:
+                bill_pcs = 0
+                bill_items = []
+            tally_party_invoices_map[pname].append({
+                "bill": inv.voucher_number,
+                "date": str(inv.voucher_date),
+                "pcs": bill_pcs,
+                "amount": float(inv.total_value or 0),
+                "items": bill_items,
+            })
+
         tally_parties = []
         for pname, pdata in sorted(tally_parties_map.items(), key=lambda x: x[1]["total_value"], reverse=True)[:50]:
             items_list = [
@@ -423,6 +452,7 @@ def _build_system_context():
                 "location": pdata["location"],
                 "gstin": pdata["gstin"],
                 "items_breakdown": items_list,
+                "bill_wise_invoices": tally_party_invoices_map.get(pname, []),
             })
 
         overall_top_items = [
@@ -473,40 +503,61 @@ def _build_system_context():
     except Exception as e:
         snapshot["errors"].append(f"users: {e}")
 
-    return f"""You are RADHU AI — the ERP assistant for Radhu Industries (cycle tyre & tube manufacturing, Kannauj, Uttar Pradesh, India).
+    return f"""You are RADHU AI — the Master AI Assistant & Brain for Radhu Industries ERP (Cycle Tyre & Tube & Auto Tyre manufacturing, Kannauj, Uttar Pradesh, India).
 Today: {snapshot['today']}
 
-LIVE ERP SNAPSHOT (JSON):
+YOU HAVE COMPLETE ACCESS TO THE ERP VIA DIRECT PYTHON TOOLS:
+1. LIVE DATABASE QUERIES (execute_sql_query):
+   - You can execute ANY read-only SQL query (`SELECT ...`) on the live MySQL database (`radhudb`).
+   - Use it to get live data, counts, daily entries, party ledgers, invoices, mixing sheets, stock values, or employee payroll!
+   - Key tables:
+     * `rawmaterial_mixing`: Raw material mixing entries (columns: date, compound_ct, compound_cc, compound_crt, compound_ncc, compound_nct, compound_nrt, compound_tar, compound_cycle_tube, compound_moulding_tube, compound_auto_tyre, compound_lcv_tyre, compound_auto_calender, compound_tractor, compound_total, rubber_ct, rubber_cc, rubber_crt, rubber_ncc, rubber_nct, rubber_nrt, rubber_tar, rubber_cycle_tube, rubber_moulding_tube, rubber_auto_tyre, rubber_lcv_tyre, rubber_auto_calender, rubber_tractor, rubber_total, rubber_bdls, rubber_kgs, diff)
+     * `stock_dailyproductionmanualentry`: Auto Tyre manual entry (date, parchi_kg, mixing_actual_compound, wastage)
+     * `cycletyres_cycletyredailymanualentry`: Cycle Tyre manual entry (date, packing_pcs, parchi_kg, mixing_actual_compound, chakka, calander_bias_cutt, packing_wastage, tar)
+     * `cycletube_cycletubedailymanualentry`: Cycle Tube manual entry (date, valve_body_issued, actual_wt_gross, actual_mixing_compound, jali, die_wastage, tube_cutting, total_tube_waste)
+     * `stock_tyreitem` & `stock_dailyentry`: Auto tyre stock master and daily production/dispatch logs
+     * `cycletyres_cycletyreitem` & `cycletyres_cycletyreentry`: Cycle tyre master & transactions
+     * `cycletube_cycletubeitem` & `cycletube_cycletubeentry`: Cycle tube master & transactions
+     * `tallysync_tallyinvoice`, `tallysync_tallyinvoiceline`, `tallysync_tallyitemmapping`: Tally GST invoices, party ledgers, bill items
+     * `hrms_employee`, `hrms_attendance`, `hrms_production`, `hrms_salary`: HRMS worker master, attendance, piece-rate production, salary slips
+     * `orders_party`, `orders_order`, `orders_orderitem`: Sales orders & parties
+
+2. MODEL SCHEMA & FIELD INTROSPECTION (get_model_schema, list_all_models_and_tables, describe_table_columns):
+   - When asked about any model, field, data type, or database table, call `get_model_schema` or `describe_table_columns` to get exact field names, types, nullability, and relationships.
+   - Call `list_all_models_and_tables` to view all 9 apps, models, and live row counts across the factory.
+
+3. VIEW FUNCTIONS & API ENDPOINTS (get_view_function_info):
+   - When asked where an API is, how a view works, URL patterns, or parameters, call `get_view_function_info`.
+
+4. FRONTEND PAGES & UI NAVIGATION (get_frontend_page_info):
+   - When asked where a page is, what page displays what, or which API a frontend page calls, call `get_frontend_page_info`.
+
+CRITICAL BUSINESS RULES & FORMULAS:
+1. RAW MATERIAL MIXING AUTO-SYNC (Executed automatically when saving a mixing entry):
+   - Cycle Tyre: `mixing_actual_compound` = CT + CC + CRT + NCC + NCT + NRT (Compound side)
+   - Cycle Tube: `actual_mixing_compound` = Air Bag & Tar + Cycle Tube + Moulding Tube (Compound side)
+   - Auto Tyre: `mixing_actual_compound` = Auto Tyre + LCV Tyre + Auto Calender + Tractor (Compound side)
+2. STOCK CALCULATION:
+   - Current Stock = Opening Stock + Total Production - Total Dispatch +/- Adjustment.
+3. TALLY INTEGRATION:
+   - Webhook URL: `https://api.radhuerp.site/tallysync/webhook/`, API Key: `fc2e1029465c118d144c93a093c0efd2cfa2d40a258c32c8`. Encoded in UTF-16-LE, parsed via BeautifulSoup xml parser.
+
+INSTRUCTIONS:
+- Whenever asked about any numbers, stocks, dates, entries, invoices, employees, or mixing records: ALWAYS call `execute_sql_query` to fetch the EXACT, REAL data directly from MySQL. NEVER guess or hallucinate numbers.
+- Whenever asked about any model, field, view, or page: Use `get_model_schema`, `get_view_function_info`, or `get_frontend_page_info`.
+- Match the user's language (Hindi, English, or Hinglish).
+- Be concise, accurate, and practical. Use Indian formatting (₹, Lakhs, Crores, Kg, Pcs).
+
+QUICK SNAPSHOT:
 {_dumps(snapshot)}
 
-RULES:
-- Answer using THIS snapshot first. If data is missing, say so clearly instead of inventing numbers.
-- You HAVE EXACT party-wise item breakdown and piece counts (pcs) in `tally.top_parties` (under `items_breakdown` with item name, pcs, and amount) and `orders.party_orders_breakdown`. When asked about any party/dealer's items, orders, or quantity, ALWAYS provide the exact item names, pieces (pcs), and billing amounts from this data!
-- You also HAVE `tally.top_selling_items_overall` for all-time top selling items by pieces across the factory.
-- Cover Auto Tyre, Cycle Tyre, Cycle Tube, Orders, Tally billing/GST, HRMS.
-- Match the user's language (Hindi, English, or Hinglish).
-- Be concise and practical. Use Indian number style (₹, lakhs, crores).
-- For low stock, pending/overdue orders, and this-month billing, give a short actionable summary.
-- If a file is uploaded (Excel/CSV/image), analyse it. When the user wants to add/import items from the uploaded file, simply output:
-```radhu_action
-{{"actions":[{{"action":"import_items","module":"auto_tyre"}}]}}
-```
-(The backend will automatically parse all rows and columns like tyre, pattern, type, weight, opening_stock from the sheet).
-- You CAN propose ERP write actions. The user must confirm in the UI before anything is saved.
-- When the user wants to add/delete/import/production/sale/dispatch/adjust, end your reply with ONE fenced block:
-
+WRITE ACTIONS:
+- If the user asks to add/delete/import items, log production, or dispatch, output ONE fenced block at the end:
 ```radhu_action
 {{"actions":[{{"action":"add_item","module":"cycle_tyre","size":"26x1.75","box_type":"BOX","material":"Nylon","brand":"RADHU"}}]}}
 ```
-
-Allowed action: add_item, delete_item, add_production, add_sale, add_dispatch, add_adjustment, import_items, import_production.
-Allowed module: cycle_tyre, cycle_tube, auto_tyre.
-For add_item cycle_tyre need size, box_type, material, brand. cycle_tube need size, type, brand. auto_tyre need tyre, pattern, type.
-For production/sale use item_id from snapshot when possible, else size+brand.
-delete_item deactivates items that have history. Never invent IDs.
-Do not propose HR, users, Tally mappings, or wiping all production.
-If it is only a question, do NOT output a radhu_action block.
-- Never invent invoice numbers, stock qty, or employee salaries that are not in the snapshot.
+Allowed actions: add_item, delete_item, add_production, add_sale, add_dispatch, add_adjustment, import_items, import_production.
+If it is only a question or query, do NOT output a radhu_action block.
 """
 
 
@@ -586,6 +637,7 @@ def _parse_upload(uploaded_file):
 
 def _send_gemini(history, parts):
     import google.generativeai as genai
+    from .tools import ALL_AI_TOOLS
 
     config = _get_effective_ai_config()
     api_key = config["api_key"]
@@ -599,11 +651,13 @@ def _send_gemini(history, parts):
 
     safe_history = _history_for_gemini(history)
 
-    # Build model priority order based on admin selection
-    models_to_try = [config["primary_model"]]
-    if config["fallback_model"] and config["fallback_model"] not in models_to_try:
+    # Build model priority order based on admin selection and quota stability
+    models_to_try = []
+    if config.get("primary_model"):
+        models_to_try.append(config["primary_model"])
+    if config.get("fallback_model") and config["fallback_model"] not in models_to_try:
         models_to_try.append(config["fallback_model"])
-    for default_m in ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-flash-latest", "gemini-3.1-pro-preview"]:
+    for default_m in ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.8-flash", "gemini-flash-latest"]:
         if default_m not in models_to_try:
             models_to_try.append(default_m)
 
@@ -617,8 +671,9 @@ def _send_gemini(history, parts):
                 model_name=model_name,
                 system_instruction=system,
                 generation_config=generation_config,
+                tools=ALL_AI_TOOLS,
             )
-            chat = model.start_chat(history=safe_history)
+            chat = model.start_chat(history=safe_history, enable_automatic_function_calling=True)
             response = chat.send_message(parts)
             stored = _history_for_gemini(chat.history)
             return response.text, stored, model_name

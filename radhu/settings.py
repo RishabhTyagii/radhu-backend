@@ -31,6 +31,7 @@ INSTALLED_APPS = [
     'hrms',
     'orders',
     'ai_agent',
+    'rawmaterial',
 ]
 
 MIDDLEWARE = [
