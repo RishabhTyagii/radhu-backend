@@ -343,24 +343,49 @@ BACKEND_VIEWS = [
 ]
 
 # -------------------------------------------------------------
-# GEMINI FUNCTION CALLING TOOLS
+# GEMINI FUNCTION CALLING TOOLS (WITH ANTI-OVERLOAD SAFEGUARDS)
 # -------------------------------------------------------------
+
+_SQL_QUERY_CACHE = {}  # query_hash -> (timestamp, result_json)
+CACHE_TTL_SECONDS = 30
 
 def execute_sql_query(query: str) -> str:
     """Executes a read-only SQL query (SELECT, SHOW, DESCRIBE, EXPLAIN) against the Radhu ERP MySQL database and returns results as JSON.
     Use this to look up ANY live data: mixing records, stocks, sales, invoices, parties, employees, attendance, salaries, production.
     DO NOT execute INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, or mutation queries."""
-    clean = query.strip().upper()
-    if not (clean.startswith('SELECT') or clean.startswith('SHOW') or clean.startswith('DESCRIBE') or clean.startswith('EXPLAIN')):
+    clean = query.strip()
+    upper = clean.upper()
+
+    if not (upper.startswith('SELECT') or upper.startswith('SHOW') or upper.startswith('DESCRIBE') or upper.startswith('EXPLAIN')):
         return json.dumps({"error": "Only read-only queries (SELECT, SHOW, DESCRIBE, EXPLAIN) are permitted."})
 
     for bad in ['DROP ', 'DELETE ', 'UPDATE ', 'INSERT ', 'ALTER ', 'TRUNCATE ', 'REPLACE ', 'CREATE ', 'GRANT ', 'REVOKE ']:
-        if bad in clean:
+        if bad in upper:
             return json.dumps({"error": f"Mutation statement with '{bad.strip()}' is blocked in read-only execute_sql_query."})
+
+    # 1. Check in-memory cache to prevent duplicate queries on server
+    import time
+    now = time.time()
+    cache_key = clean.lower()
+    if cache_key in _SQL_QUERY_CACHE:
+        cached_time, cached_res = _SQL_QUERY_CACHE[cache_key]
+        if now - cached_time < CACHE_TTL_SECONDS:
+            return cached_res
+
+    # 2. Automatically inject LIMIT 100 if query is SELECT and lacks a LIMIT clause
+    safe_query = clean
+    if upper.startswith('SELECT') and ' LIMIT ' not in upper:
+        safe_query = clean.rstrip(';') + ' LIMIT 100;'
 
     try:
         with connection.cursor() as cursor:
-            cursor.execute(query)
+            # Enforce 2000ms (2 second) hard execution timeout on MySQL
+            try:
+                cursor.execute("SET SESSION max_execution_time = 2000;")
+            except Exception:
+                pass
+
+            cursor.execute(safe_query)
             if not cursor.description:
                 return json.dumps({"rows": [], "count": 0})
             cols = [col[0] for col in cursor.description]
@@ -376,9 +401,13 @@ def execute_sql_query(query: str) -> str:
                     else:
                         item[col] = val
                 res.append(item)
-            return json.dumps({"count": len(res), "rows": res}, default=str)
+
+            result_str = json.dumps({"count": len(res), "rows": res}, default=str)
+            # Store in cache
+            _SQL_QUERY_CACHE[cache_key] = (now, result_str)
+            return result_str
     except Exception as e:
-        return json.dumps({"error": f"SQL Error: {str(e)}", "query": query})
+        return json.dumps({"error": f"SQL Error: {str(e)}", "query": safe_query})
 
 
 def get_model_schema(model_or_table_name: str) -> str:
