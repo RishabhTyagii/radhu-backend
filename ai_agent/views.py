@@ -503,6 +503,16 @@ def _build_system_context():
     except Exception as e:
         snapshot["errors"].append(f"users: {e}")
 
+    learned_rules_text = ""
+    try:
+        from .models import AiLearnedMemory
+        memories = list(AiLearnedMemory.objects.filter(is_active=True).values("category", "key", "content"))
+        if memories:
+            lines = [f"- [{m['category'].upper()}] {m['key']}: {m['content']}" for m in memories]
+            learned_rules_text = "\n\n🧠 CONTINUOUS SELF-LEARNED RULES & KNOWLEDGE (Trained from past conversations):\n" + "\n".join(lines)
+    except Exception:
+        pass
+
     return f"""You are RADHU AI — the Master AI Assistant & Brain for Radhu Industries ERP (Cycle Tyre & Tube & Auto Tyre manufacturing, Kannauj, Uttar Pradesh, India).
 Today: {snapshot['today']}
 
@@ -532,6 +542,10 @@ YOU HAVE COMPLETE ACCESS TO THE ERP VIA DIRECT PYTHON TOOLS:
 4. FRONTEND PAGES & UI NAVIGATION (get_frontend_page_info):
    - When asked where a page is, what page displays what, or which API a frontend page calls, call `get_frontend_page_info`.
 
+5. CONTINUOUS SELF-LEARNING & SELF-TRAINING (learn_and_remember, recall_learned_memories):
+   - You have tools `learn_and_remember(key, content, category)` and `recall_learned_memories(search_term)`.
+   - Whenever the user teaches you something new, clarifies a formula, corrects a previous answer, or asks you to remember a preference or rule (e.g. "Ye yaad rakhna: ..."), ALWAYS call `learn_and_remember` to permanently save it in your continuous training memory!
+
 CRITICAL BUSINESS RULES & FORMULAS:
 1. RAW MATERIAL MIXING AUTO-SYNC (Executed automatically when saving a mixing entry):
    - Cycle Tyre: `mixing_actual_compound` = CT + CC + CRT + NCC + NCT + NRT (Compound side)
@@ -540,7 +554,7 @@ CRITICAL BUSINESS RULES & FORMULAS:
 2. STOCK CALCULATION:
    - Current Stock = Opening Stock + Total Production - Total Dispatch +/- Adjustment.
 3. TALLY INTEGRATION:
-   - Webhook URL: `https://api.radhuerp.site/tallysync/webhook/`, API Key: `fc2e1029465c118d144c93a093c0efd2cfa2d40a258c32c8`. Encoded in UTF-16-LE, parsed via BeautifulSoup xml parser.
+   - Webhook URL: `https://api.radhuerp.site/tallysync/webhook/`, API Key: `fc2e1029465c118d144c93a093c0efd2cfa2d40a258c32c8`. Encoded in UTF-16-LE, parsed via BeautifulSoup xml parser.{learned_rules_text}
 
 INSTRUCTIONS:
 - Whenever asked about any numbers, stocks, dates, entries, invoices, employees, or mixing records: ALWAYS call `execute_sql_query` to fetch the EXACT, REAL data directly from MySQL. NEVER guess or hallucinate numbers.
@@ -940,3 +954,67 @@ def ai_agent_status(request):
         "can_write": True,
         "confirm_required": True,
     })
+
+
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
+def ai_memories_view(request):
+    from .models import AiLearnedMemory
+    if request.method == "GET":
+        qs = AiLearnedMemory.objects.filter(is_active=True).order_by("-updated_at")
+        data = [{
+            "id": m.id,
+            "category": m.category,
+            "key": m.key,
+            "content": m.content,
+            "source": m.source,
+            "confidence": m.confidence,
+            "usage_count": m.usage_count,
+            "created_at": m.created_at.isoformat() if m.created_at else None,
+            "updated_at": m.updated_at.isoformat() if m.updated_at else None,
+        } for m in qs]
+        return Response({"memories": data, "count": len(data)})
+
+    # POST - create or update
+    key = (request.data.get("key") or "").strip()
+    content = (request.data.get("content") or "").strip()
+    category = (request.data.get("category") or "general").strip()
+    if not key or not content:
+        return Response({"error": "Key and content are required."}, status=400)
+
+    mem, created = AiLearnedMemory.objects.update_or_create(
+        key=key[:200],
+        defaults={
+            "content": content,
+            "category": category if category in ["rule", "formula", "correction", "preference", "party_note"] else "general",
+            "source": "user_ui",
+            "is_active": True,
+        }
+    )
+    invalidate_context_cache()
+    return Response({
+        "status": "success",
+        "created": created,
+        "memory": {
+            "id": mem.id,
+            "category": mem.category,
+            "key": mem.key,
+            "content": mem.content,
+            "updated_at": mem.updated_at.isoformat(),
+        }
+    })
+
+
+@api_view(["DELETE"])
+@permission_classes([IsAuthenticated])
+def ai_memory_delete_view(request, memory_id):
+    from .models import AiLearnedMemory
+    try:
+        mem = AiLearnedMemory.objects.get(id=memory_id)
+        mem.is_active = False
+        mem.save(update_fields=["is_active"])
+        invalidate_context_cache()
+        return Response({"ok": True, "message": "Memory removed."})
+    except AiLearnedMemory.DoesNotExist:
+        return Response({"error": "Memory not found."}, status=404)
+

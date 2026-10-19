@@ -47,3 +47,13 @@ class AiAuditLogAdmin(admin.ModelAdmin):
         "status", "risk_level", "summary", "payload", "result", "error_message",
         "created_at", "executed_at", "expires_at",
     )
+
+
+from .models import AiLearnedMemory
+
+@admin.register(AiLearnedMemory)
+class AiLearnedMemoryAdmin(admin.ModelAdmin):
+    list_display = ("key", "category", "source", "confidence", "usage_count", "is_active", "updated_at")
+    list_filter = ("category", "is_active", "source")
+    search_fields = ("key", "content")
+

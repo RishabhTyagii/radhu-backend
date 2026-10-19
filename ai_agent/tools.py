@@ -511,8 +511,46 @@ def describe_table_columns(table_name: str) -> str:
             rows = cursor.fetchall()
             res = [dict(zip(cols, r)) for r in rows]
             return json.dumps({"table": clean_table, "columns": res})
+def learn_and_remember(key: str, content: str, category: str = "general") -> str:
+    """Permanently teaches and saves a new fact, user preference, calculation formula, business rule, or correction into Radhu AI's continuous training memory.
+    Call this tool whenever the user teaches you something new, clarifies an ERP process, corrects a previous answer, or asks you to remember something.
+    Categories: 'rule', 'formula', 'correction', 'preference', 'party_note', 'general'.
+    Example: learn_and_remember(key='Auto Tyre Mixing Formula', content='Auto Tyre mixing actual is sum of Auto Tyre + LCV + Auto Calender + Tractor from compound side', category='formula')."""
+    try:
+        from .models import AiLearnedMemory
+        mem, created = AiLearnedMemory.objects.update_or_create(
+            key=key.strip()[:200],
+            defaults={
+                "content": content.strip(),
+                "category": category.strip().lower() if category in ["rule", "formula", "correction", "preference", "party_note"] else "general",
+                "source": "user_interaction",
+                "is_active": True,
+            }
+        )
+        # Invalidate context cache so memory is immediately live
+        from .views import invalidate_context_cache
+        invalidate_context_cache()
+        action = "Created new" if created else "Updated existing"
+        return json.dumps({
+            "status": "success",
+            "message": f"{action} memory rule successfully: '{mem.key}'. Radhu AI will remember and apply this permanently."
+        })
     except Exception as e:
-        return json.dumps({"error": str(e), "table": clean_table})
+        return json.dumps({"error": f"Failed to save learned memory: {str(e)}"})
+
+
+def recall_learned_memories(search_term: str = "") -> str:
+    """Retrieves all active self-learned memories, rules, and formulas previously trained into Radhu AI.
+    Example: recall_learned_memories('formula') or recall_learned_memories()."""
+    try:
+        from .models import AiLearnedMemory
+        qs = AiLearnedMemory.objects.filter(is_active=True)
+        if search_term.strip():
+            qs = qs.filter(key__icontains=search_term) | qs.filter(content__icontains=search_term)
+        mems = list(qs.values("id", "category", "key", "content", "usage_count", "updated_at"))
+        return json.dumps({"total_learned_rules": len(mems), "memories": mems}, default=str)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
 
 
 # List of tool functions to provide to Gemini
@@ -523,4 +561,7 @@ ALL_AI_TOOLS = [
     get_view_function_info,
     get_frontend_page_info,
     describe_table_columns,
+    learn_and_remember,
+    recall_learned_memories,
 ]
+

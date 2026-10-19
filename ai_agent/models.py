@@ -124,3 +124,32 @@ class AiConfig(models.Model):
     def get_solo(cls):
         obj, _ = cls.objects.get_or_create(id=1)
         return obj
+
+
+class AiLearnedMemory(models.Model):
+    CATEGORY_CHOICES = [
+        ("rule", "Business Rule"),
+        ("formula", "Calculation Formula"),
+        ("correction", "User Correction"),
+        ("preference", "User Preference"),
+        ("party_note", "Party / Customer Note"),
+        ("general", "General Factory Knowledge"),
+    ]
+
+    category = models.CharField(max_length=30, choices=CATEGORY_CHOICES, default="general")
+    key = models.CharField(max_length=200, help_text="Short title/topic of learned knowledge")
+    content = models.TextField(help_text="Detailed knowledge, formula, or rule learned by the AI")
+    source = models.CharField(max_length=50, default="user_interaction")
+    confidence = models.FloatField(default=1.0)
+    usage_count = models.IntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        verbose_name = "AI Learned Memory"
+        verbose_name_plural = "AI Learned Memories"
+
+    def __str__(self):
+        return f"[{self.category}] {self.key}"

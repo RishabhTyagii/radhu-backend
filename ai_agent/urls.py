@@ -7,4 +7,6 @@ urlpatterns = [
     path('actions/confirm/', views.ai_action_confirm, name='ai_action_confirm'),
     path('actions/reject/', views.ai_action_reject, name='ai_action_reject'),
     path('logs/', views.ai_audit_logs, name='ai_audit_logs'),
+    path('memories/', views.ai_memories_view, name='ai_memories'),
+    path('memories/<int:memory_id>/delete/', views.ai_memory_delete_view, name='ai_memory_delete'),
 ]
