@@ -11,11 +11,13 @@ from .models import UserProfile, PAGES_MAP
 from .serializers import UserSerializer
 
 
+from django.middleware.csrf import get_token
+
 @api_view(['GET'])
 @permission_classes([AllowAny])
 @ensure_csrf_cookie
 def csrf_token_view(request):
-    return Response({'ok': True})
+    return Response({'ok': True, 'csrfToken': get_token(request)})
 
 
 @api_view(['POST'])
