@@ -3,6 +3,7 @@ from django.contrib.auth.models import User
 
 
 class TyreItem(models.Model):
+    sku = models.CharField("SKU", max_length=50, blank=True, null=True, default="", db_index=True)
     tyre = models.CharField("TYRE", max_length=50)
     pattern = models.CharField("PATTERN", max_length=80)
     type = models.CharField("TYPE", max_length=20)

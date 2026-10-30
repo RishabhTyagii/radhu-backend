@@ -22,19 +22,23 @@ def _recalculate_item_stocks():
     for item in CycleTyreItem.objects.all():
         p1 = CycleTyreEntry.objects.filter(tyre_item=item, entry_type='production').aggregate(t=Sum('first_grade'))['t'] or 0
         p2 = CycleTyreEntry.objects.filter(tyre_item=item, entry_type='production').aggregate(t=Sum('second_grade'))['t'] or 0
+        p_rej = CycleTyreEntry.objects.filter(tyre_item=item, entry_type='production').aggregate(t=Sum('rejected_grade'))['t'] or 0
 
         s1 = CycleTyreEntry.objects.filter(tyre_item=item, entry_type='sale', bucket='stock').aggregate(t=Sum('quantity'))['t'] or 0
         s2 = CycleTyreEntry.objects.filter(tyre_item=item, entry_type='sale', bucket='second_stock').aggregate(t=Sum('quantity'))['t'] or 0
+        s_rej = CycleTyreEntry.objects.filter(tyre_item=item, entry_type='sale', bucket='rejected_stock').aggregate(t=Sum('quantity'))['t'] or 0
         sr = CycleTyreEntry.objects.filter(tyre_item=item, entry_type='sale', bucket='rfm_stock').aggregate(t=Sum('quantity'))['t'] or 0
 
         a1 = CycleTyreEntry.objects.filter(tyre_item=item, entry_type='adjustment', bucket='stock').aggregate(t=Sum('quantity'))['t'] or 0
         a2 = CycleTyreEntry.objects.filter(tyre_item=item, entry_type='adjustment', bucket='second_stock').aggregate(t=Sum('quantity'))['t'] or 0
+        a_rej = CycleTyreEntry.objects.filter(tyre_item=item, entry_type='adjustment', bucket='rejected_stock').aggregate(t=Sum('quantity'))['t'] or 0
         ar = CycleTyreEntry.objects.filter(tyre_item=item, entry_type='adjustment', bucket='rfm_stock').aggregate(t=Sum('quantity'))['t'] or 0
 
         item.stock = p1 - s1 + a1
         item.second_stock = p2 - s2 + a2
+        item.rejected_stock = p_rej - s_rej + a_rej
         item.rfm_stock = 0 - sr + ar
-        item.save(update_fields=['stock', 'second_stock', 'rfm_stock'])
+        item.save(update_fields=['stock', 'second_stock', 'rejected_stock', 'rfm_stock'])
 
 
 @api_view(["GET"])
@@ -78,7 +82,9 @@ def dashboard(request):
                 month_param = "all"
                 is_filtered_range = False
 
-    today_prod = CycleTyreEntry.objects.filter(date=today, entry_type="production").aggregate(
+    today_prod = CycleTyreEntry.objects.filter(
+        date=today, entry_type="production"
+    ).exclude(bucket="rfm_stock").exclude(tyre_item__size__iexact="RFM").exclude(tyre_item__brand__icontains="Return From Market").aggregate(
         t1=Sum("first_grade"), t2=Sum("second_grade")
     )
     today_prod_total = (today_prod["t1"] or 0) + (today_prod["t2"] or 0)
@@ -97,6 +103,7 @@ def dashboard(request):
     tot_month_prod_second = 0
     tot_month_prod_rejected = 0
     tot_month_sale_first = 0
+    tot_month_sale_second = 0
     tot_rfm_stock = 0
     tot_closing_first = 0
     tot_closing_second = 0
@@ -158,6 +165,8 @@ def dashboard(request):
             ).aggregate(t=Sum("quantity"))["t"] or 0
 
             month_sale_first = s1_month
+            month_sale_second = s2_month
+            month_sale_total = s1_month + s2_month
 
             closing_first = prev_closing_first + month_prod_first - s1_month + a1_month
             closing_second = prev_closing_second + month_prod_second - s2_month + a2_month
@@ -183,6 +192,10 @@ def dashboard(request):
             month_sale_first = CycleTyreEntry.objects.filter(
                 tyre_item=item, entry_type="sale", bucket="stock"
             ).aggregate(t=Sum("quantity"))["t"] or 0
+            month_sale_second = CycleTyreEntry.objects.filter(
+                tyre_item=item, entry_type="sale", bucket="second_stock"
+            ).aggregate(t=Sum("quantity"))["t"] or 0
+            month_sale_total = month_sale_first + month_sale_second
 
             closing_first = item.stock
             closing_second = item.second_stock
@@ -198,6 +211,8 @@ def dashboard(request):
             "month_prod_second": month_prod_second,
             "month_prod_rejected": month_prod_rejected,
             "month_sale_first": month_sale_first,
+            "month_sale_second": month_sale_second,
+            "month_sale_total": month_sale_total,
             "rfm_stock": rfm,
             "closing_first": closing_first,
             "closing_second": closing_second,
@@ -212,10 +227,35 @@ def dashboard(request):
         tot_month_prod_second += month_prod_second
         tot_month_prod_rejected += month_prod_rejected
         tot_month_sale_first += month_sale_first
+        tot_month_sale_second += month_sale_second
         tot_rfm_stock += rfm
         tot_closing_first += closing_first
         tot_closing_second += closing_second
         tot_total_stock += total_stock_item
+
+    # Calculate overall C-Grade (rejected) production, sale, and RFM sale
+    if is_filtered_range and filter_start and filter_end:
+        tot_c_prod = CycleTyreEntry.objects.filter(
+            entry_type="production", date__gte=filter_start, date__lte=filter_end
+        ).aggregate(t=Sum("rejected_grade"))["t"] or 0
+        tot_c_sale = CycleTyreEntry.objects.filter(
+            entry_type="sale", bucket="rejected_stock", date__gte=filter_start, date__lte=filter_end
+        ).aggregate(t=Sum("quantity"))["t"] or 0
+        tot_rfm_sale = CycleTyreEntry.objects.filter(
+            entry_type="sale", bucket="rfm_stock", date__gte=filter_start, date__lte=filter_end
+        ).aggregate(t=Sum("quantity"))["t"] or 0
+    else:
+        tot_c_prod = CycleTyreEntry.objects.filter(
+            entry_type="production"
+        ).aggregate(t=Sum("rejected_grade"))["t"] or 0
+        tot_c_sale = CycleTyreEntry.objects.filter(
+            entry_type="sale", bucket="rejected_stock"
+        ).aggregate(t=Sum("quantity"))["t"] or 0
+        tot_rfm_sale = CycleTyreEntry.objects.filter(
+            entry_type="sale", bucket="rfm_stock"
+        ).aggregate(t=Sum("quantity"))["t"] or 0
+
+    grand_total_sale = tot_month_sale_first + tot_month_sale_second + tot_c_sale + tot_rfm_sale
 
     # Build available months list dynamically
     entry_dates = CycleTyreEntry.objects.dates("date", "month", order="DESC")
@@ -252,8 +292,12 @@ def dashboard(request):
             "month_prod_total": tot_month_prod_total,
             "month_prod_first": tot_month_prod_first,
             "month_prod_second": tot_month_prod_second,
-            "month_prod_rejected": tot_month_prod_rejected,
+            "month_prod_rejected": tot_c_prod,
             "month_sale_first": tot_month_sale_first,
+            "month_sale_second": tot_month_sale_second,
+            "month_sale_rejected": tot_c_sale,
+            "month_sale_rfm": tot_rfm_sale,
+            "grand_total_sale": grand_total_sale,
             "closing_first": tot_closing_first,
             "closing_second": tot_closing_second,
             "total_stock": tot_total_stock,
@@ -264,8 +308,12 @@ def dashboard(request):
             "month_prod_total": tot_month_prod_total,
             "month_prod_first": tot_month_prod_first,
             "month_prod_second": tot_month_prod_second,
-            "month_prod_rejected": tot_month_prod_rejected,
+            "month_prod_rejected": tot_c_prod,
             "month_sale_first": tot_month_sale_first,
+            "month_sale_second": tot_month_sale_second,
+            "month_sale_rejected": tot_c_sale,
+            "month_sale_rfm": tot_rfm_sale,
+            "grand_total_sale": grand_total_sale,
             "rfm_stock": tot_rfm_stock,
             "closing_first": tot_closing_first,
             "closing_second": tot_closing_second,
@@ -320,6 +368,14 @@ def add_production(request):
         item.rejected_stock += rejected_grade
         item.save(update_fields=["stock", "second_stock", "rejected_stock"])
 
+        emp_id = request.data.get("employee_id")
+        linked_emp = None
+        if emp_id:
+            try:
+                linked_emp = int(emp_id)
+            except ValueError:
+                pass
+
         entry = CycleTyreEntry.objects.create(
             tyre_item=item,
             entry_type="production",
@@ -332,6 +388,7 @@ def add_production(request):
             date=date_val,
             remark=remark,
             user=request.user if request.user.is_authenticated else None,
+            linked_employee_id=linked_emp
         )
 
     return Response(CycleTyreEntrySerializer(entry).data, status=status.HTTP_201_CREATED)
@@ -464,6 +521,7 @@ def entries_log(request):
     date_param = request.query_params.get("date")
     month_param = request.query_params.get("month")
     entry_type = request.query_params.get("entry_type") or request.query_params.get("type")
+    tyre_item_param = request.query_params.get("tyre_item")
 
     if date_param:
         qs = qs.filter(date=date_param)
@@ -473,6 +531,9 @@ def entries_log(request):
             qs = qs.filter(date__year=int(parts[0]), date__month=int(parts[1]))
         except (ValueError, IndexError):
             pass
+
+    if tyre_item_param:
+        qs = qs.filter(tyre_item_id=tyre_item_param)
 
     if entry_type and entry_type != "all":
         qs = qs.filter(entry_type=entry_type)
@@ -946,9 +1007,14 @@ def daily_summary(request):
             try: return Decimal(str(v)) if v else Decimal("0.00")
             except: return Decimal("0.00")
 
+        def to_int(v):
+            try: return int(v) if v else 0
+            except: return 0
+
         manual, created = CycleTyreDailyManualEntry.objects.update_or_create(
             date=date_val,
             defaults={
+                "packing_pcs": to_int(request.data.get("packing_pcs")),
                 "parchi_kg": to_dec(request.data.get("parchi_kg")),
                 "mixing_actual_compound": to_dec(request.data.get("mixing_actual_compound")),
                 "chakka": to_dec(request.data.get("chakka")),
@@ -969,7 +1035,7 @@ def daily_summary(request):
 
     prod_entries = CycleTyreEntry.objects.filter(
         entry_type="production", date__gte=start_date, date__lte=end_date
-    ).select_related("tyre_item")
+    ).exclude(bucket="rfm_stock").exclude(tyre_item__size__iexact="RFM").exclude(tyre_item__brand__icontains="Return From Market").select_related("tyre_item")
 
     by_date = {}
     for e in prod_entries:
@@ -995,6 +1061,8 @@ def daily_summary(request):
         stats = by_date.get(d, {"production_pcs": 0, "packing_pcs": 0, "theoretical_kg": Decimal("0.00")})
         manual = manual_entries.get(d)
 
+        # Allow manual override for packing_pcs if present in manual entry
+        packing_pcs_val = manual.packing_pcs if (manual and manual.packing_pcs is not None and manual.packing_pcs > 0) else stats["packing_pcs"]
         parchi_kg = manual.parchi_kg if manual else Decimal("0.00")
         mixing_actual = manual.mixing_actual_compound if manual else Decimal("0.00")
         chakka = manual.chakka if manual else Decimal("0.00")
@@ -1010,7 +1078,7 @@ def daily_summary(request):
         rows.append({
             "date": str(d),
             "production_pcs": stats["production_pcs"],
-            "packing_pcs": stats["packing_pcs"],
+            "packing_pcs": packing_pcs_val,
             "theoretical_kg": str(round(theoretical_kg, 2)),
             "parchi_kg": str(parchi_kg),
             "difference": str(round(difference, 2)),
@@ -1024,7 +1092,7 @@ def daily_summary(request):
         })
 
         tot_prod_pcs += stats["production_pcs"]
-        tot_pack_pcs += stats["packing_pcs"]
+        tot_pack_pcs += packing_pcs_val
         tot_theo_kg += theoretical_kg
         tot_parchi_kg += parchi_kg
         tot_diff += difference
@@ -1268,17 +1336,23 @@ def production_sheet(request):
             target_date = datetime.datetime.strptime(date_param, "%Y-%m-%d").date()
         except ValueError:
             target_date = today
-        entries = CycleTyreEntry.objects.filter(entry_type="production", date=target_date).select_related("tyre_item")
+        entries = CycleTyreEntry.objects.filter(
+            entry_type="production", date=target_date
+        ).exclude(bucket="rfm_stock").exclude(tyre_item__size__iexact="RFM").exclude(tyre_item__brand__icontains="Return From Market").select_related("tyre_item")
     elif month_param:
         try:
             parts = month_param.split("-")
             year, month = int(parts[0]), int(parts[1])
         except (ValueError, IndexError):
             year, month = today.year, today.month
-        entries = CycleTyreEntry.objects.filter(entry_type="production", date__year=year, date__month=month).select_related("tyre_item")
+        entries = CycleTyreEntry.objects.filter(
+            entry_type="production", date__year=year, date__month=month
+        ).exclude(bucket="rfm_stock").exclude(tyre_item__size__iexact="RFM").exclude(tyre_item__brand__icontains="Return From Market").select_related("tyre_item")
     else:
         # Default to current month instead of showing ALL entries
-        entries = CycleTyreEntry.objects.filter(entry_type="production", date__year=today.year, date__month=today.month).select_related("tyre_item")
+        entries = CycleTyreEntry.objects.filter(
+            entry_type="production", date__year=today.year, date__month=today.month
+        ).exclude(bucket="rfm_stock").exclude(tyre_item__size__iexact="RFM").exclude(tyre_item__brand__icontains="Return From Market").select_related("tyre_item")
 
     item_map = {}
     tot_curing, tot_first, tot_second, tot_rejected = 0, 0, 0, 0
@@ -1297,6 +1371,7 @@ def production_sheet(request):
                 "first_grade": 0,
                 "second_grade": 0,
                 "rejected_grade": 0,
+                "dates_data": {},
             }
         
         curing_qty = e.all_curing if e.all_curing > 0 else e.quantity
@@ -1308,6 +1383,13 @@ def production_sheet(request):
         item_map[tid]["first_grade"] += first_qty
         item_map[tid]["second_grade"] += second_qty
         item_map[tid]["rejected_grade"] += rejected_qty
+
+        date_str = str(e.date)
+        if date_str not in item_map[tid]["dates_data"]:
+            item_map[tid]["dates_data"][date_str] = {"a": 0, "b": 0, "c": 0}
+        item_map[tid]["dates_data"][date_str]["a"] += first_qty
+        item_map[tid]["dates_data"][date_str]["b"] += second_qty
+        item_map[tid]["dates_data"][date_str]["c"] += rejected_qty
 
         tot_curing += curing_qty
         tot_first += first_qty
@@ -1329,6 +1411,126 @@ def production_sheet(request):
         "date": date_param or str(today),
         "month": month_param or today.strftime("%Y-%m"),
     })
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def export_production_sheet(request):
+    """
+    Export monthly date-wise item production in the exact format of
+    DATE WISE PRODUCTION.xlsx (template based).
+    """
+    import calendar
+    from io import BytesIO
+    import openpyxl
+    from openpyxl.utils import get_column_letter
+    from django.http import HttpResponse
+    from django.conf import settings
+    import os
+
+    today = datetime.date.today()
+    month_param = request.query_params.get("month", "").strip()
+
+    if month_param and month_param != "all":
+        try:
+            parts = month_param.split("-")
+            year, month = int(parts[0]), int(parts[1])
+        except (ValueError, IndexError):
+            year, month = today.year, today.month
+    else:
+        year, month = today.year, today.month
+
+    # Template file path
+    base_dir = getattr(settings, 'BASE_DIR', None)
+    template_path = os.path.join(base_dir, 'templates', 'excel', 'DATE_WISE_PRODUCTION.xlsx') if base_dir else None
+
+    if not template_path or not os.path.exists(template_path):
+        # Fallback to local Desktop or EC2 fixed path
+        for candidate in [
+            '/var/www/radhu-backend/templates/excel/DATE_WISE_PRODUCTION.xlsx',
+            r'C:\Users\risha\Desktop\DATE WISE PRODUCTION.xlsx',
+        ]:
+            if os.path.exists(candidate):
+                template_path = candidate
+                break
+
+    if not template_path or not os.path.exists(template_path):
+        return Response({"error": "Template file DATE_WISE_PRODUCTION.xlsx not found on server"}, status=404)
+
+    wb = openpyxl.load_workbook(template_path)
+    ws = wb.active
+
+    _, num_days = calendar.monthrange(year, month)
+    month_name = calendar.month_name[month].upper()
+
+    # Update Title (Row 1)
+    ws.cell(1, 8, f"PER DATE ITEM WISE PRODUCTION DATA OF CYCLE TYRE FOR THE MONTH OF {month_name} {year}")
+
+    # Fetch production entries for this month
+    entries = CycleTyreEntry.objects.filter(
+        entry_type='production',
+        date__year=year,
+        date__month=month
+    ).exclude(bucket="rfm_stock").exclude(tyre_item__size__iexact="RFM").exclude(tyre_item__brand__icontains="Return From Market").select_related('tyre_item')
+
+    prod_data = {}
+    for e in entries:
+        tid = e.tyre_item_id
+        day = e.date.day
+        if (tid, day) not in prod_data:
+            prod_data[(tid, day)] = {'a': 0, 'b': 0, 'c': 0}
+        prod_data[(tid, day)]['a'] += (e.first_grade if e.first_grade > 0 else e.quantity)
+        prod_data[(tid, day)]['b'] += (e.second_grade or 0)
+        prod_data[(tid, day)]['c'] += (e.rejected_grade or 0)
+
+    # 48 standard items matching rows 7 to 54 in the template
+    items = list(CycleTyreItem.objects.filter(is_active=True).exclude(size__in=['C-Grade', 'RFM']))
+
+    # Update dates in Row 5
+    for day in range(1, 31):
+        c = 5 + (day - 1) * 3
+        if day <= num_days:
+            ws.cell(5, c, datetime.datetime(year, month, day, 0, 0))
+
+    # Fill data for rows 7 to 54
+    for r in range(7, 55):
+        item_idx = r - 7
+        if item_idx < len(items):
+            item = items[item_idx]
+            for day in range(1, 31):
+                col_a = 5 + (day - 1) * 3
+                col_b = col_a + 1
+                col_c = col_a + 2
+
+                if day <= num_days:
+                    vals = prod_data.get((item.id, day), {'a': 0, 'b': 0, 'c': 0})
+                    if vals['a'] > 0:
+                        ws.cell(r, col_a, vals['a'])
+                    if vals['b'] > 0:
+                        ws.cell(r, col_b, vals['b'])
+                    if vals['c'] > 0:
+                        ws.cell(r, col_c, vals['c'])
+
+            # Set Item Row Sum Formulas for TOTAL (Cols 95, 96, 97)
+            a_cells = [f"{get_column_letter(5 + (d-1)*3)}{r}" for d in range(1, min(num_days, 30) + 1)]
+            b_cells = [f"{get_column_letter(6 + (d-1)*3)}{r}" for d in range(1, min(num_days, 30) + 1)]
+            c_cells = [f"{get_column_letter(7 + (d-1)*3)}{r}" for d in range(1, min(num_days, 30) + 1)]
+
+            ws.cell(r, 95, f"={'+'.join(a_cells)}")
+            ws.cell(r, 96, f"={'+'.join(b_cells)}")
+            ws.cell(r, 97, f"={'+'.join(c_cells)}")
+
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    filename = f"DATE_WISE_PRODUCTION_{year}_{month:02d}.xlsx"
+    response = HttpResponse(
+        output.getvalue(),
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return response
 
 
 def _get_tally_parties_map():
@@ -1937,3 +2139,234 @@ def ai_analytics_v2(request):
         "party_propensity": clean_party_propensity,
     })
 
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def update_employee(request, pk):
+    entry = get_object_or_404(CycleTyreEntry, pk=pk)
+    emp_id = request.data.get('employee_id')
+    if not emp_id:
+        entry.linked_employee_id = None
+    else:
+        try:
+            entry.linked_employee_id = int(emp_id)
+        except (ValueError, TypeError):
+            return Response({'error': 'Invalid employee ID'}, status=status.HTTP_400_BAD_REQUEST)
+    entry.save(update_fields=['linked_employee_id'])
+    return Response({'success': True})
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def passbook_ledger(request):
+    """
+    Bank Passbook / Stock Ledger statement for Cycle Tyre items.
+    Calculates Opening Balance, Inflows (Production), Outflows (Sales/Dispatches),
+    Adjustments, and Running Balance.
+    """
+    today = datetime.date.today()
+    item_id_param = request.query_params.get("tyre_item") or request.query_params.get("item_id")
+    bucket_param = request.query_params.get("bucket", "stock").strip()  # default 1st grade / stock
+    from_date_str = request.query_params.get("from_date") or request.query_params.get("start_date")
+    to_date_str = request.query_params.get("to_date") or request.query_params.get("end_date")
+    search_q = request.query_params.get("search", "").strip().lower()
+
+    try:
+        from_date = datetime.datetime.strptime(from_date_str, "%Y-%m-%d").date() if from_date_str else today.replace(day=1)
+    except:
+        from_date = today.replace(day=1)
+
+    try:
+        to_date = datetime.datetime.strptime(to_date_str, "%Y-%m-%d").date() if to_date_str else today
+    except:
+        to_date = today
+
+    all_items = CycleTyreItem.objects.filter(is_active=True).order_by("size", "brand")
+    items_list = [
+        {
+            "id": it.id,
+            "name": str(it),
+            "size": it.size,
+            "brand": it.brand,
+            "box_type": it.box_type,
+            "stock": it.stock,
+            "second_stock": it.second_stock,
+            "rejected_stock": it.rejected_stock,
+            "total_stock": it.total_stock,
+        }
+        for it in all_items
+    ]
+
+    selected_item = None
+    selected_item_obj = None
+    if item_id_param and item_id_param != "all":
+        try:
+            selected_item_obj = CycleTyreItem.objects.get(pk=int(item_id_param))
+            selected_item = {
+                "id": selected_item_obj.id,
+                "name": str(selected_item_obj),
+                "size": selected_item_obj.size,
+                "brand": selected_item_obj.brand,
+                "stock": selected_item_obj.stock,
+                "second_stock": selected_item_obj.second_stock,
+                "rejected_stock": selected_item_obj.rejected_stock,
+                "total_stock": selected_item_obj.total_stock,
+            }
+        except (CycleTyreItem.DoesNotExist, ValueError):
+            selected_item_obj = None
+    elif item_id_param != "all":
+        # Default to item with recent activity or first item
+        from django.db.models import Count
+        most_active = CycleTyreEntry.objects.values("tyre_item").annotate(c=Count("id")).order_by("-c").first()
+        if most_active:
+            try:
+                selected_item_obj = CycleTyreItem.objects.get(pk=most_active["tyre_item"])
+            except:
+                selected_item_obj = all_items.first()
+        else:
+            selected_item_obj = all_items.first()
+
+        if selected_item_obj:
+            selected_item = {
+                "id": selected_item_obj.id,
+                "name": str(selected_item_obj),
+                "size": selected_item_obj.size,
+                "brand": selected_item_obj.brand,
+                "stock": selected_item_obj.stock,
+                "second_stock": selected_item_obj.second_stock,
+                "rejected_stock": selected_item_obj.rejected_stock,
+                "total_stock": selected_item_obj.total_stock,
+            }
+
+    def extract_party(remark_text):
+        if not remark_text:
+            return ""
+        if "Party:" in remark_text:
+            part = remark_text.split("Party:")[1].strip()
+            if "[" in part and "]" in part:
+                part = part.split("[")[0].strip()
+            return part
+        return ""
+
+    prior_qs = CycleTyreEntry.objects.filter(date__lt=from_date)
+    period_qs = CycleTyreEntry.objects.filter(date__gte=from_date, date__lte=to_date)
+
+    if selected_item_obj:
+        prior_qs = prior_qs.filter(tyre_item=selected_item_obj)
+        period_qs = period_qs.filter(tyre_item=selected_item_obj)
+
+    if bucket_param and bucket_param != "all":
+        prior_qs = prior_qs.filter(bucket=bucket_param)
+        period_qs = period_qs.filter(bucket=bucket_param)
+
+    opening_balance = 0
+    for e in prior_qs.order_by("date", "id"):
+        if e.entry_type == "production":
+            in_q = e.first_grade if (bucket_param == "stock" and e.first_grade > 0) else e.quantity
+            opening_balance += in_q
+        elif e.entry_type == "sale":
+            opening_balance -= e.quantity
+        elif e.entry_type == "adjustment":
+            opening_balance += e.quantity
+
+    running_balance = opening_balance
+    transactions = []
+    total_in = 0
+    total_out = 0
+
+    period_entries = list(period_qs.select_related("tyre_item").order_by("date", "created_at", "id"))
+
+    for e in period_entries:
+        in_qty = 0
+        out_qty = 0
+        narration = ""
+        party_name = extract_party(e.remark)
+
+        if e.entry_type == "production":
+            in_qty = e.first_grade if (bucket_param == "stock" and e.first_grade > 0) else e.quantity
+            out_qty = 0
+            narration = "Daily Production (1st Grade)" if bucket_param == "stock" else f"Daily Production ({e.get_bucket_display()})"
+            if e.remark:
+                narration += f" — {e.remark}"
+        elif e.entry_type == "sale":
+            in_qty = 0
+            out_qty = e.quantity
+            narration = "Dispatched to Party"
+            if party_name:
+                narration = f"Dispatched: {party_name}"
+            if e.bill_number:
+                narration += f" (Bill: {e.bill_number})"
+            if e.remark and not party_name:
+                narration += f" — {e.remark}"
+        elif e.entry_type == "adjustment":
+            if e.quantity >= 0:
+                in_qty = e.quantity
+                out_qty = 0
+                narration = f"Stock Adjustment (+) {e.remark or ''}".strip()
+            else:
+                in_qty = 0
+                out_qty = abs(e.quantity)
+                narration = f"Stock Adjustment (-) {e.remark or ''}".strip()
+
+        running_balance += (in_qty - out_qty)
+        total_in += in_qty
+        total_out += out_qty
+
+        row_searchable = f"{e.date} {e.bill_number} {party_name} {e.remark} {narration} {str(e.tyre_item)}".lower()
+        if search_q and search_q not in row_searchable:
+            continue
+
+        transactions.append({
+            "id": e.id,
+            "date": str(e.date),
+            "created_at": e.created_at.strftime("%I:%M %p") if e.created_at else "",
+            "entry_type": e.entry_type,
+            "bucket": e.bucket,
+            "bucket_display": e.get_bucket_display(),
+            "tyre_item_id": e.tyre_item_id,
+            "tyre_name": str(e.tyre_item),
+            "bill_number": e.bill_number or "-",
+            "party_name": party_name or "-",
+            "narration": narration,
+            "remark": e.remark or "",
+            "in_qty": in_qty,
+            "out_qty": out_qty,
+            "balance": running_balance,
+        })
+
+    return Response({
+        "items": items_list,
+        "selected_item": selected_item,
+        "bucket": bucket_param,
+        "from_date": str(from_date),
+        "to_date": str(to_date),
+        "opening_balance": opening_balance,
+        "closing_balance": running_balance,
+        "total_in": total_in,
+        "total_out": total_out,
+        "net_change": total_in - total_out,
+        "total_count": len(transactions),
+        "transactions": transactions,
+    })
+
+
+@api_view(["POST", "PATCH"])
+@permission_classes([IsAuthenticated])
+def update_item_sku(request):
+    """Update SKU number for a CycleTyreItem."""
+    item_id = request.data.get("id") or request.data.get("item_id")
+    sku = (request.data.get("sku") or "").strip()
+    if not item_id:
+        return Response({"error": "Item ID is required."}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        item = CycleTyreItem.objects.get(id=item_id)
+        item.sku = sku
+        item.save(update_fields=["sku"])
+        return Response({
+            "status": "success",
+            "id": item.id,
+            "sku": item.sku,
+            "message": "SKU updated successfully."
+        })
+    except CycleTyreItem.DoesNotExist:
+        return Response({"error": "Cycle tyre item not found."}, status=status.HTTP_404_NOT_FOUND)

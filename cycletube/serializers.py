@@ -8,6 +8,7 @@ class CycleTubeItemSerializer(serializers.ModelSerializer):
         model = CycleTubeItem
         fields = [
             "id",
+            "sku",
             "size",
             "type",
             "brand",

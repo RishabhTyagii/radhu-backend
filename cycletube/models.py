@@ -9,6 +9,7 @@ TUBE_QUALITY_CHOICES = [
 ]
 
 class CycleTubeItem(models.Model):
+    sku = models.CharField("SKU", max_length=50, blank=True, null=True, default="", db_index=True)
     size = models.CharField("SIZE", max_length=50)
     type = models.CharField("TYPE", max_length=20)
     brand = models.CharField("BRAND", max_length=80)

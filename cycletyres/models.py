@@ -4,6 +4,7 @@ from django.contrib.auth.models import User
 
 class CycleTyreItem(models.Model):
     """Master list of cycle tyres (BOX TYPE + SIZE + MATERIAL + BRAND)."""
+    sku = models.CharField("SKU", max_length=50, blank=True, null=True, default="", db_index=True)
     box_type = models.CharField("BOX TYPE", max_length=30)
     size = models.CharField("SIZE", max_length=50)
     material = models.CharField("MATERIAL", max_length=20)
@@ -24,7 +25,7 @@ class CycleTyreItem(models.Model):
 
     def __str__(self):
         w_str = f" [{self.weight}kg]" if self.weight else ""
-        return f"{self.size} {self.box_type} {self.material} {self.brand}{w_str}".strip()
+        return " ".join(f"{self.size} {self.box_type} {self.material} {self.brand}{w_str}".split())
 
     @property
     def total_stock(self):
@@ -33,6 +34,7 @@ class CycleTyreItem(models.Model):
 BUCKET_CHOICES = [
     ("stock", "STOCK (1st Grade)"),
     ("second_stock", "2nd Grade Stock"),
+    ("rejected_stock", "Rejected / C-Grade Stock"),
     ("rfm_stock", "R.F.M. Stock"),
 ]
 
@@ -58,6 +60,7 @@ class CycleTyreEntry(models.Model):
     bill_number = models.CharField(max_length=50, blank=True)
     remark = models.CharField(max_length=255, blank=True)
     user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name="cycletyre_entries")
+    linked_employee_id = models.IntegerField(null=True, blank=True, help_text="ID of HRMS Employee linked to this production")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -71,6 +74,7 @@ COMPOUND_PERCENT = Decimal("0.825")
 
 class CycleTyreDailyManualEntry(models.Model):
     date = models.DateField(unique=True)
+    packing_pcs = models.IntegerField("Packing Pcs Manual", default=0, null=True, blank=True)
     parchi_kg = models.DecimalField("Packing Parch Kg", max_digits=10, decimal_places=2, default=0)
     mixing_actual_compound = models.DecimalField("Mixing Actual Compound", max_digits=10, decimal_places=2, default=0)
     chakka = models.DecimalField("Chakka", max_digits=10, decimal_places=2, default=0)

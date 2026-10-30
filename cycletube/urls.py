@@ -10,4 +10,8 @@ urlpatterns = [
     path("entries/", views.entries_log, name="cycletube-entries"),
     path("monthly-report/", views.monthly_report, name="cycletube-monthly-report"),
     path("production-summary/", views.production_summary, name="cycletube-production-summary"),
+    path("production-sheet/", views.production_sheet, name="cycletube-production-sheet"),
+    path("export-production-sheet/", views.export_production_sheet, name="cycletube-export-production-sheet"),
+    path("items/update-sku/", views.update_tube_sku, name="cycletube_update_sku"),
+    path("transactions/", views.transactions_ledger, name="cycletube_transactions"),
 ]
