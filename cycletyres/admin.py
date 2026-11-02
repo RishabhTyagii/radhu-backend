@@ -3,9 +3,10 @@ from .models import CycleTyreItem, CycleTyreEntry, CycleTyreDailyManualEntry
 
 @admin.register(CycleTyreItem)
 class CycleTyreItemAdmin(admin.ModelAdmin):
-    list_display = ["id", "size", "box_type", "material", "brand", "weight", "stock", "second_stock", "rfm_stock", "total_stock", "is_active", "created_at"]
+    list_display = ["id", "sku", "size", "box_type", "material", "brand", "weight", "stock", "second_stock", "rfm_stock", "total_stock", "is_active", "created_at"]
+    list_editable = ["sku"]
     list_filter = ["is_active", "box_type", "material", "brand"]
-    search_fields = ["size", "box_type", "material", "brand"]
+    search_fields = ["sku", "size", "box_type", "material", "brand"]
 
 @admin.register(CycleTyreEntry)
 class CycleTyreEntryAdmin(admin.ModelAdmin):

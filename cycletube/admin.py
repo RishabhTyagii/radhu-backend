@@ -3,9 +3,10 @@ from .models import CycleTubeItem, CycleTubeEntry, CycleTubeDailyManualEntry
 
 @admin.register(CycleTubeItem)
 class CycleTubeItemAdmin(admin.ModelAdmin):
-    list_display = ["id", "size", "type", "brand", "weight", "stock", "rfm_stock", "total_stock", "is_active", "created_at"]
+    list_display = ["id", "sku", "size", "type", "brand", "weight", "stock", "rfm_stock", "total_stock", "is_active", "created_at"]
+    list_editable = ["sku"]
     list_filter = ["is_active", "type", "brand"]
-    search_fields = ["size", "type", "brand"]
+    search_fields = ["sku", "size", "type", "brand"]
     ordering = ["size", "type", "brand"]
 
 @admin.register(CycleTubeEntry)
