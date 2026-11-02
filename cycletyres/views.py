@@ -1478,41 +1478,61 @@ def export_production_sheet(request):
     month_name = calendar.month_name[month].upper()
     label = f"{date_param}" if is_single_date else f"{month_name} {year}"
 
-    # Typography & Styles
-    f_title = Font(name="Calibri", size=15, bold=True, color="FFFFFF")
-    f_sub = Font(name="Calibri", size=10, bold=False, color="FFFFFF")
-    f_heading = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
-    f_tbl_hdr = Font(name="Calibri", size=9, bold=True, color="FFFFFF")
-    f_data = Font(name="Calibri", size=9)
-    f_bold = Font(name="Calibri", size=9, bold=True)
-    f_tot = Font(name="Calibri", size=10, bold=True, color="0F172A")
+    # ── Aesthetic Slate & Corporate Indigo Theme ──
+    C_CORP_NAVY = "0F172A"   # Slate 900
+    C_HDR_NAVY  = "1E293B"   # Slate 800
+    C_SUB_SLATE = "334155"   # Slate 700
+    C_DAY_HDR   = "475569"   # Slate 600
+    C_ZEBRA     = "F8FAFC"   # Slate 50
+    C_FOOT      = "F1F5F9"   # Slate 100
+    C_BORDER    = "E2E8F0"   # Slate 200
+    C_CODE_BG   = "F1F5F9"   # Code column light background
+    C_CODE_TXT  = "1D4ED8"   # Blue 700
+    C_MUTED     = "94A3B8"   # Slate 400
 
-    fill_hdr = PatternFill(start_color="1E3A8A", end_color="1E3A8A", fill_type="solid")
-    fill_sub = PatternFill(start_color="2D6A9F", end_color="2D6A9F", fill_type="solid")
-    fill_day = PatternFill(start_color="154360", end_color="154360", fill_type="solid")
-    fill_zebra = PatternFill(start_color="F8FAFC", end_color="F8FAFC", fill_type="solid")
-    fill_tot = PatternFill(start_color="E2E8F0", end_color="E2E8F0", fill_type="solid")
+    f_corp = Font(name="Segoe UI", size=13, bold=True, color="FFFFFF")
+    f_addr = Font(name="Segoe UI", size=9, bold=False, color=C_MUTED)
+    f_title = Font(name="Segoe UI", size=10.5, bold=True, color="FFFFFF")
+    f_hdr = Font(name="Segoe UI", size=9.5, bold=True, color="FFFFFF")
+    f_subhdr = Font(name="Segoe UI", size=8.5, bold=True, color="FFFFFF")
+    f_day = Font(name="Segoe UI", size=8, bold=True, color="FFFFFF")
+    f_data = Font(name="Segoe UI", size=9.5)
+    f_bold = Font(name="Segoe UI", size=9.5, bold=True)
+    f_code = Font(name="Segoe UI", size=9.5, bold=True, color=C_CODE_TXT)
+    f_foot = Font(name="Segoe UI", size=10, bold=True, color=C_CORP_NAVY)
+
+    fill_corp = PatternFill("solid", fgColor=C_CORP_NAVY)
+    fill_hdr  = PatternFill("solid", fgColor=C_HDR_NAVY)
+    fill_sub  = PatternFill("solid", fgColor=C_SUB_SLATE)
+    fill_day  = PatternFill("solid", fgColor=C_DAY_HDR)
+    fill_zebra = PatternFill("solid", fgColor=C_ZEBRA)
+    fill_foot = PatternFill("solid", fgColor=C_FOOT)
+    fill_code = PatternFill("solid", fgColor=C_CODE_BG)
 
     al_center = Alignment(horizontal="center", vertical="center")
     al_left = Alignment(horizontal="left", vertical="center")
     al_right = Alignment(horizontal="right", vertical="center")
 
-    thin = Side(border_style="thin", color="CBD5E1")
-    double = Side(border_style="double", color="1E3A8A")
-    border_cell = Border(left=thin, right=thin, top=thin, bottom=thin)
-    border_tot = Border(left=thin, right=thin, top=thin, bottom=double)
+    thin_border = Border(
+        left=Side(style="thin", color=C_BORDER),
+        right=Side(style="thin", color=C_BORDER),
+        top=Side(style="thin", color=C_BORDER),
+        bottom=Side(style="thin", color=C_BORDER)
+    )
+    foot_border = Border(
+        left=Side(style="thin", color=C_BORDER),
+        right=Side(style="thin", color=C_BORDER),
+        top=Side(style="thin", color="CBD5E1"),
+        bottom=Side(style="double", color=C_CORP_NAVY)
+    )
 
-    if is_single_date:
-        entries = list(CycleTyreEntry.objects.filter(
-            entry_type='production', date=date_param
-        ).exclude(bucket="rfm_stock").exclude(tyre_item__size__iexact="RFM").exclude(tyre_item__brand__icontains="Return From Market").select_related('tyre_item', 'user'))
-    else:
-        entries = list(CycleTyreEntry.objects.filter(
-            entry_type='production', date__year=year, date__month=month
-        ).exclude(bucket="rfm_stock").exclude(tyre_item__size__iexact="RFM").exclude(tyre_item__brand__icontains="Return From Market").select_related('tyre_item', 'user'))
+    # CRITICAL FIX: ALWAYS query FULL MONTH entries for Sheet 1 & 2
+    month_entries = list(CycleTyreEntry.objects.filter(
+        entry_type='production', date__year=year, date__month=month
+    ).exclude(bucket="rfm_stock").exclude(tyre_item__size__iexact="RFM").exclude(tyre_item__brand__icontains="Return From Market").select_related('tyre_item', 'user'))
 
     prod_data = {}
-    for e in entries:
+    for e in month_entries:
         tid = e.tyre_item_id
         day = e.date.day
         if (tid, day) not in prod_data:
@@ -1529,69 +1549,80 @@ def export_production_sheet(request):
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
 
+    # ══════════════════════════════════════════════════════════════
     # SHEET 1: Daily Matrix (1-31)
+    # ══════════════════════════════════════════════════════════════
     ws1 = wb.create_sheet("Daily Matrix (1-31)")
     ws1.views.sheetView[0].showGridLines = True
 
     tot_start_col = 6 + num_days * 3
     last_col = tot_start_col + 3
 
-    # Title Banner
+    # Corporate Header
     ws1.merge_cells(start_row=1, start_column=1, end_row=1, end_column=last_col)
     c1 = ws1.cell(1, 1, "RADHU INDUSTRIES")
-    c1.font = f_title; c1.fill = fill_hdr; c1.alignment = al_center
+    c1.font = f_corp; c1.fill = fill_corp; c1.alignment = al_center
     ws1.row_dimensions[1].height = 28
 
     ws1.merge_cells(start_row=2, start_column=1, end_row=2, end_column=last_col)
-    c2 = ws1.cell(2, 1, "17/5 MILE STONE DELHI MEERUT ROAD MURAD NAGAR U.P.-201206")
-    c2.font = f_sub; c2.fill = fill_sub; c2.alignment = al_center
+    c2 = ws1.cell(2, 1, "17/5 Mile Stone, Delhi-Meerut Road, Murad Nagar, U.P. - 201206")
+    c2.font = f_addr; c2.fill = fill_corp; c2.alignment = al_center
     ws1.row_dimensions[2].height = 18
 
     ws1.merge_cells(start_row=3, start_column=1, end_row=3, end_column=last_col)
-    c3 = ws1.cell(3, 1, f"CYCLE TYRE — DATE-WISE PRODUCTION MATRIX | {label}")
-    c3.font = f_heading; c3.fill = fill_hdr; c3.alignment = al_center
-    ws1.row_dimensions[3].height = 22
+    c3 = ws1.cell(3, 1, f"CYCLE TYRE — DATE-WISE PRODUCTION MATRIX  |  {label}")
+    c3.font = f_title; c3.fill = fill_hdr; c3.alignment = al_center
+    ws1.row_dimensions[3].height = 24
 
-    # Row 4: Dates Header
-    ws1.merge_cells("A4:E4")
-    ws1.cell(4, 1, "ITEM DETAILS").font = f_tbl_hdr
-    ws1.cell(4, 1).fill = fill_hdr; ws1.cell(4, 1).alignment = al_center
+    ws1.row_dimensions[4].height = 6  # Aesthetic spacer row
+
+    # Row 5: Group Headers
+    ws1.merge_cells("A5:E5")
+    h_spec = ws1.cell(5, 1, "ITEM SPECIFICATIONS")
+    h_spec.font = f_hdr; h_spec.fill = fill_hdr; h_spec.alignment = al_center
+    for c in range(1, 6):
+        ws1.cell(5, c).border = thin_border; ws1.cell(5, c).fill = fill_hdr
 
     for d in range(1, num_days + 1):
         sc = 6 + (d - 1) * 3
         ec = sc + 2
-        ws1.merge_cells(start_row=4, start_column=sc, end_row=4, end_column=ec)
-        dt_cell = ws1.cell(4, sc, f"{d:02d}-{month_name[:3]}")
-        dt_cell.font = f_tbl_hdr; dt_cell.fill = fill_day; dt_cell.alignment = al_center
+        ws1.merge_cells(start_row=5, start_column=sc, end_row=5, end_column=ec)
+        dt_cell = ws1.cell(5, sc, f"{d:02d}-{month_name[:3]}")
+        dt_cell.font = f_subhdr; dt_cell.fill = fill_sub; dt_cell.alignment = al_center
+        for c in range(sc, ec + 1):
+            ws1.cell(5, c).border = thin_border; ws1.cell(5, c).fill = fill_sub
 
-    ws1.merge_cells(start_row=4, start_column=tot_start_col, end_row=4, end_column=last_col)
-    tot_banner = ws1.cell(4, tot_start_col, "MONTHLY TOTALS")
-    tot_banner.font = f_tbl_hdr; tot_banner.fill = fill_hdr; tot_banner.alignment = al_center
+    ws1.merge_cells(start_row=5, start_column=tot_start_col, end_row=5, end_column=last_col)
+    tot_banner = ws1.cell(5, tot_start_col, "MONTHLY TOTALS")
+    tot_banner.font = f_hdr; tot_banner.fill = fill_hdr; tot_banner.alignment = al_center
+    for c in range(tot_start_col, last_col + 1):
+        ws1.cell(5, c).border = thin_border; ws1.cell(5, c).fill = fill_hdr
+    ws1.row_dimensions[5].height = 22
 
-    # Row 5: Column Sub-headers
-    ws1.row_dimensions[5].height = 20
+    # Row 6: Sub-headers
+    ws1.row_dimensions[6].height = 20
     fixed_hdrs = ["#", "CODE", "SIZE", "PLY / TYPE", "BRAND"]
     for ci, h in enumerate(fixed_hdrs, 1):
-        c = ws1.cell(5, ci, h)
-        c.font = f_tbl_hdr; c.fill = fill_hdr; c.alignment = al_center; c.border = border_cell
+        c = ws1.cell(6, ci, h)
+        c.font = f_hdr; c.fill = fill_hdr; c.alignment = al_center; c.border = thin_border
 
     for d in range(1, num_days + 1):
         sc = 6 + (d - 1) * 3
         for sub_idx, sub_label in enumerate(["A", "B", "C"]):
             col = sc + sub_idx
-            c = ws1.cell(5, col, sub_label)
-            c.font = Font(name="Calibri", size=8, bold=True, color="FFFFFF")
-            c.fill = fill_sub; c.alignment = al_center; c.border = border_cell
+            c = ws1.cell(6, col, sub_label)
+            c.font = f_day; c.fill = fill_day; c.alignment = al_center; c.border = thin_border
 
     for idx, h_tot in enumerate(["A (1st)", "B (2nd)", "C (Rej)", "TOTAL"]):
         col = tot_start_col + idx
-        c = ws1.cell(5, col, h_tot)
-        c.font = f_tbl_hdr; c.fill = fill_hdr; c.alignment = al_center; c.border = border_cell
+        c = ws1.cell(6, col, h_tot)
+        c.font = f_hdr; c.fill = fill_hdr; c.alignment = al_center; c.border = thin_border
 
-    r_idx = 6
+    # Fill Rows (Row 7+)
+    r_idx = 7
     for idx, item in enumerate(all_items, 1):
         rf = fill_zebra if idx % 2 == 0 else PatternFill("solid", fgColor="FFFFFF")
-        ws1.row_dimensions[r_idx].height = 18
+        ws1.row_dimensions[r_idx].height = 19
 
         ws1.cell(r_idx, 1, idx).alignment = al_center
         ws1.cell(r_idx, 2, item.sku or "").alignment = al_center
@@ -1601,8 +1632,9 @@ def export_production_sheet(request):
 
         for c in range(1, 6):
             cell = ws1.cell(r_idx, c)
-            cell.font = f_bold if c == 2 else f_data
-            cell.fill = rf; cell.border = border_cell
+            cell.font = f_code if c == 2 else (f_bold if c == 3 else f_data)
+            cell.fill = fill_code if c == 2 else rf
+            cell.border = thin_border
 
         for d in range(1, num_days + 1):
             sc = 6 + (d - 1) * 3
@@ -1613,50 +1645,51 @@ def export_production_sheet(request):
 
             for col_obj, color_txt in [(ca, "1D4ED8"), (cb, "B45309"), (cc, "DC2626")]:
                 col_obj.alignment = al_right
-                col_obj.border = border_cell
+                col_obj.border = thin_border
                 col_obj.fill = rf
                 if col_obj.value:
-                    col_obj.font = Font(name="Calibri", size=9, bold=True, color=color_txt)
+                    col_obj.font = Font(name="Segoe UI", size=9.5, bold=True, color=color_txt)
 
         a_cols = [f"{get_column_letter(6 + (d-1)*3)}{r_idx}" for d in range(1, num_days + 1)]
         b_cols = [f"{get_column_letter(7 + (d-1)*3)}{r_idx}" for d in range(1, num_days + 1)]
         c_cols = [f"{get_column_letter(8 + (d-1)*3)}{r_idx}" for d in range(1, num_days + 1)]
 
-        tot_a = ws1.cell(r_idx, tot_start_col, f"={'+'.join(a_cols)}")
-        tot_b = ws1.cell(r_idx, tot_start_col + 1, f"={'+'.join(b_cols)}")
-        tot_c = ws1.cell(r_idx, tot_start_col + 2, f"={'+'.join(c_cols)}")
+        tot_a = ws1.cell(r_idx, tot_start_col, f'=IF(SUM({"+".join(a_cols)})=0,"",SUM({"+".join(a_cols)}))')
+        tot_b = ws1.cell(r_idx, tot_start_col + 1, f'=IF(SUM({"+".join(b_cols)})=0,"",SUM({"+".join(b_cols)}))')
+        tot_c = ws1.cell(r_idx, tot_start_col + 2, f'=IF(SUM({"+".join(c_cols)})=0,"",SUM({"+".join(c_cols)}))')
 
         col_a_let = get_column_letter(tot_start_col)
         col_b_let = get_column_letter(tot_start_col + 1)
         col_c_let = get_column_letter(tot_start_col + 2)
-        tot_all = ws1.cell(r_idx, tot_start_col + 3, f"={col_a_let}{r_idx}+{col_b_let}{r_idx}+{col_c_let}{r_idx}")
+        tot_all = ws1.cell(r_idx, tot_start_col + 3, f'=IF(SUM({col_a_let}{r_idx}:{col_c_let}{r_idx})=0,"",SUM({col_a_let}{r_idx}:{col_c_let}{r_idx}))')
 
         for cell_tot in [tot_a, tot_b, tot_c, tot_all]:
             cell_tot.font = f_bold
             cell_tot.alignment = al_right
-            cell_tot.border = border_cell
+            cell_tot.border = thin_border
             cell_tot.fill = fill_zebra
 
         r_idx += 1
 
+    # Footer Total Row
     foot_row = r_idx
-    ws1.row_dimensions[foot_row].height = 22
+    ws1.row_dimensions[foot_row].height = 24
     ws1.merge_cells(f"A{foot_row}:E{foot_row}")
     f_lbl = ws1.cell(foot_row, 1, "TOTAL PRODUCTION")
-    f_lbl.font = f_tot; f_lbl.alignment = al_center; f_lbl.fill = fill_tot
+    f_lbl.font = f_foot; f_lbl.alignment = al_center; f_lbl.fill = fill_foot
 
     for col in range(1, last_col + 1):
         c = ws1.cell(foot_row, col)
-        c.border = border_tot
-        c.fill = fill_tot
+        c.border = foot_border
+        c.fill = fill_foot
 
     for col in range(6, last_col + 1):
         col_let = get_column_letter(col)
-        c = ws1.cell(foot_row, col, f"=SUM({col_let}6:{col_let}{foot_row - 1})")
-        c.font = f_tot; c.alignment = al_right
+        c = ws1.cell(foot_row, col, f"=SUM({col_let}7:{col_let}{foot_row - 1})")
+        c.font = f_foot; c.alignment = al_right
 
     ws1.column_dimensions["A"].width = 5
-    ws1.column_dimensions["B"].width = 9
+    ws1.column_dimensions["B"].width = 10
     ws1.column_dimensions["C"].width = 13
     ws1.column_dimensions["D"].width = 14
     ws1.column_dimensions["E"].width = 15
@@ -1668,37 +1701,41 @@ def export_production_sheet(request):
         ws1.column_dimensions[get_column_letter(sc + 2)].width = 5
 
     for ci in range(tot_start_col, last_col + 1):
-        ws1.column_dimensions[get_column_letter(ci)].width = 9
+        ws1.column_dimensions[get_column_letter(ci)].width = 9.5
 
+    # ══════════════════════════════════════════════════════════════
     # SHEET 2: Monthly Summary
+    # ══════════════════════════════════════════════════════════════
     ws2 = wb.create_sheet("Monthly Summary")
     ws2.views.sheetView[0].showGridLines = True
 
     ws2.merge_cells("A1:L1")
     c1 = ws2.cell(1, 1, "RADHU INDUSTRIES")
-    c1.font = f_title; c1.fill = fill_hdr; c1.alignment = al_center
+    c1.font = f_corp; c1.fill = fill_corp; c1.alignment = al_center
     ws2.row_dimensions[1].height = 28
 
     ws2.merge_cells("A2:L2")
-    c2 = ws2.cell(2, 1, "17/5 MILE STONE DELHI MEERUT ROAD MURAD NAGAR U.P.-201206")
-    c2.font = f_sub; c2.fill = fill_sub; c2.alignment = al_center
+    c2 = ws2.cell(2, 1, "17/5 Mile Stone, Delhi-Meerut Road, Murad Nagar, U.P. - 201206")
+    c2.font = f_addr; c2.fill = fill_corp; c2.alignment = al_center
     ws2.row_dimensions[2].height = 18
 
     ws2.merge_cells("A3:L3")
-    c3 = ws2.cell(3, 1, f"CYCLE TYRE — MONTHLY PRODUCTION SUMMARY | {label}")
-    c3.font = f_heading; c3.fill = fill_hdr; c3.alignment = al_center
-    ws2.row_dimensions[3].height = 22
+    c3 = ws2.cell(3, 1, f"CYCLE TYRE — MONTHLY PRODUCTION SUMMARY  |  {label}")
+    c3.font = f_title; c3.fill = fill_hdr; c3.alignment = al_center
+    ws2.row_dimensions[3].height = 24
+
+    ws2.row_dimensions[4].height = 6
 
     sum_hdrs = ["#", "CODE", "SIZE", "PLY / BOX", "MATERIAL", "BRAND", "1ST GRADE (A)", "2ND GRADE (B)", "REJECTED (C)", "TOTAL CURING", "WEIGHT (KG)", "TOTAL KGS"]
-    ws2.row_dimensions[5].height = 22
+    ws2.row_dimensions[5].height = 24
     for ci, h in enumerate(sum_hdrs, 1):
         c = ws2.cell(5, ci, h)
-        c.font = f_tbl_hdr; c.fill = fill_hdr; c.alignment = al_center; c.border = border_cell
+        c.font = f_hdr; c.fill = fill_hdr; c.alignment = al_center; c.border = thin_border
 
     r2_idx = 6
     for idx, item in enumerate(all_items, 1):
         rf = fill_zebra if idx % 2 == 0 else PatternFill("solid", fgColor="FFFFFF")
-        ws2.row_dimensions[r2_idx].height = 18
+        ws2.row_dimensions[r2_idx].height = 19
 
         tot_a = sum(prod_data.get((item.id, d), {'a': 0})['a'] for d in range(1, num_days + 1))
         tot_b = sum(prod_data.get((item.id, d), {'b': 0})['b'] for d in range(1, num_days + 1))
@@ -1715,70 +1752,82 @@ def export_production_sheet(request):
             tot_a if tot_a > 0 else None,
             tot_b if tot_b > 0 else None,
             tot_c if tot_c > 0 else None,
-            f"=G{r2_idx}+H{r2_idx}+I{r2_idx}",
+            f'=IF(SUM(G{r2_idx}:I{r2_idx})=0,"",SUM(G{r2_idx}:I{r2_idx}))',
             w_val,
-            f"=J{r2_idx}*K{r2_idx}"
+            f'=IF(OR(J{r2_idx}="",J{r2_idx}=0),"",ROUND(J{r2_idx}*K{r2_idx},2))'
         ]
 
         for ci, v in enumerate(vals2, 1):
             c = ws2.cell(r2_idx, ci, v)
-            c.border = border_cell
-            c.fill = rf
-            c.font = f_bold if ci in [2, 10, 12] else f_data
+            c.border = thin_border
+            c.fill = fill_code if ci == 2 else rf
+            c.font = f_code if ci == 2 else (f_bold if ci in [3, 10, 12] else f_data)
             c.alignment = al_center if ci in [1, 2, 4, 5] else (al_left if ci in [3, 6] else al_right)
 
         r2_idx += 1
 
     ws2.merge_cells(f"A{r2_idx}:F{r2_idx}")
     t2_lbl = ws2.cell(r2_idx, 1, "TOTALS")
-    t2_lbl.font = f_tot; t2_lbl.alignment = al_center; t2_lbl.fill = fill_tot
+    t2_lbl.font = f_foot; t2_lbl.alignment = al_center; t2_lbl.fill = fill_foot
 
     for col in range(1, 13):
         c = ws2.cell(r2_idx, col)
-        c.border = border_tot
-        c.fill = fill_tot
+        c.border = foot_border
+        c.fill = fill_foot
 
     for col in range(7, 11):
         col_let = get_column_letter(col)
         c = ws2.cell(r2_idx, col, f"=SUM({col_let}6:{col_let}{r2_idx - 1})")
-        c.font = f_tot; c.alignment = al_right
+        c.font = f_foot; c.alignment = al_right
 
-    ws2.cell(r2_idx, 12, f"=SUM(L6:L{r2_idx - 1})").font = f_tot
+    ws2.cell(r2_idx, 11, "") # weight blank
+    ws2.cell(r2_idx, 12, f"=SUM(L6:L{r2_idx - 1})").font = f_foot
     ws2.cell(r2_idx, 12).alignment = al_right
 
-    col_w2 = [5, 9, 14, 12, 12, 16, 13, 13, 13, 14, 12, 14]
+    col_w2 = [5, 10, 14, 12, 12, 16, 13, 13, 13, 14, 12, 14]
     for ci, w in enumerate(col_w2, 1):
         ws2.column_dimensions[get_column_letter(ci)].width = w
 
+    # ══════════════════════════════════════════════════════════════
     # SHEET 3: Date-Wise Production
+    # ══════════════════════════════════════════════════════════════
     ws3 = wb.create_sheet("Date-Wise Production")
     ws3.views.sheetView[0].showGridLines = True
 
     ws3.merge_cells("A1:K1")
     c1 = ws3.cell(1, 1, "RADHU INDUSTRIES")
-    c1.font = f_title; c1.fill = fill_hdr; c1.alignment = al_center
+    c1.font = f_corp; c1.fill = fill_corp; c1.alignment = al_center
     ws3.row_dimensions[1].height = 28
 
     ws3.merge_cells("A2:K2")
-    c2 = ws3.cell(2, 1, "17/5 MILE STONE DELHI MEERUT ROAD MURAD NAGAR U.P.-201206")
-    c2.font = f_sub; c2.fill = fill_sub; c2.alignment = al_center
+    c2 = ws3.cell(2, 1, "17/5 Mile Stone, Delhi-Meerut Road, Murad Nagar, U.P. - 201206")
+    c2.font = f_addr; c2.fill = fill_corp; c2.alignment = al_center
     ws3.row_dimensions[2].height = 18
 
     ws3.merge_cells("A3:K3")
-    c3 = ws3.cell(3, 1, f"CYCLE TYRE — DAILY PRODUCTION LOG | {label}")
-    c3.font = f_heading; c3.fill = fill_hdr; c3.alignment = al_center
-    ws3.row_dimensions[3].height = 22
+    c3 = ws3.cell(3, 1, f"CYCLE TYRE — DAILY PRODUCTION LOG  |  {label}")
+    c3.font = f_title; c3.fill = fill_hdr; c3.alignment = al_center
+    ws3.row_dimensions[3].height = 24
+
+    ws3.row_dimensions[4].height = 6
 
     led_hdrs = ["Date", "CODE", "Tyre Item", "Size", "Ply / Box", "Material", "Brand", "All Curing", "1st Grade", "2nd Grade", "Rejected"]
-    ws3.row_dimensions[5].height = 22
+    ws3.row_dimensions[5].height = 24
     for ci, h in enumerate(led_hdrs, 1):
         c = ws3.cell(5, ci, h)
-        c.font = f_tbl_hdr; c.fill = fill_hdr; c.alignment = al_center; c.border = border_cell
+        c.font = f_hdr; c.fill = fill_hdr; c.alignment = al_center; c.border = thin_border
 
-    sorted_entries = sorted(entries, key=lambda e: (e.date, sku_sort_key(e.tyre_item.sku if e.tyre_item else "", e.tyre_item.size if e.tyre_item else "")))
+    if is_single_date:
+        filtered_entries = [e for e in month_entries if str(e.date) == date_param]
+        ledger_entries = filtered_entries if filtered_entries else month_entries
+    else:
+        ledger_entries = month_entries
+
+    sorted_entries = sorted(ledger_entries, key=lambda e: (e.date, sku_sort_key(e.tyre_item.sku if e.tyre_item else "", e.tyre_item.size if e.tyre_item else "")))
     r3_idx = 6
     for idx, e in enumerate(sorted_entries, 1):
         rf = fill_zebra if idx % 2 == 0 else PatternFill("solid", fgColor="FFFFFF")
+        ws3.row_dimensions[r3_idx].height = 19
         item = e.tyre_item
         curing_qty = e.all_curing if e.all_curing > 0 else e.quantity
         first_qty = e.first_grade if e.first_grade > 0 else e.quantity
@@ -1801,9 +1850,9 @@ def export_production_sheet(request):
 
         for ci, v in enumerate(vals3, 1):
             c = ws3.cell(r3_idx, ci, v)
-            c.border = border_cell
-            c.fill = rf
-            c.font = f_bold if ci in [2, 8] else f_data
+            c.border = thin_border
+            c.fill = fill_code if ci == 2 else rf
+            c.font = f_code if ci == 2 else (f_bold if ci in [3, 8] else f_data)
             c.alignment = al_center if ci in [1, 2, 5, 6] else (al_left if ci in [3, 4, 7] else al_right)
 
         r3_idx += 1
@@ -1811,16 +1860,16 @@ def export_production_sheet(request):
     if sorted_entries:
         ws3.merge_cells(f"A{r3_idx}:G{r3_idx}")
         t3_lbl = ws3.cell(r3_idx, 1, "TOTAL")
-        t3_lbl.font = f_tot; t3_lbl.alignment = al_center; t3_lbl.fill = fill_tot
+        t3_lbl.font = f_foot; t3_lbl.alignment = al_center; t3_lbl.fill = fill_foot
         for col in range(1, 12):
-            ws3.cell(r3_idx, col).border = border_tot
-            ws3.cell(r3_idx, col).fill = fill_tot
+            ws3.cell(r3_idx, col).border = foot_border
+            ws3.cell(r3_idx, col).fill = fill_foot
         for col in range(8, 12):
             col_let = get_column_letter(col)
             c = ws3.cell(r3_idx, col, f"=SUM({col_let}6:{col_let}{r3_idx - 1})")
-            c.font = f_tot; c.alignment = al_right
+            c.font = f_foot; c.alignment = al_right
 
-    col_w3 = [12, 9, 28, 14, 12, 12, 16, 12, 12, 12, 12]
+    col_w3 = [12, 10, 28, 14, 12, 12, 16, 12, 12, 12, 12]
     for ci, w in enumerate(col_w3, 1):
         ws3.column_dimensions[get_column_letter(ci)].width = w
 
