@@ -1,3 +1,4 @@
+import re
 import datetime
 from django.db import transaction
 from django.db.models import Sum, Q
@@ -563,6 +564,26 @@ def monthly_report(request):
     })
 
 
+def sku_sort_key(sku, fallback=""):
+    """
+    Sorts codes alphanumerically like 1..100, AT1..AT20, etc.
+    Items without code go to the end, ordered alphabetically by fallback.
+    """
+    if not sku:
+        return (1, 9999, str(fallback or "").upper())
+    sku_str = str(sku).strip().upper()
+    m = re.match(r"^([A-Z]+)(\d+)(.*)$", sku_str)
+    if m:
+        prefix, num, suffix = m.groups()
+        order = 0
+        if any(x in prefix for x in ["RJ", "RS", "RFM"]):
+            order = 2
+        return (order, prefix, int(num), suffix)
+    if sku_str.isdigit():
+        return (0, "", int(sku_str), "")
+    return (0, sku_str, 0, "")
+
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def production_sheet(request):
@@ -582,8 +603,6 @@ def production_sheet(request):
         today = datetime.date.today()
         entries = DailyEntry.objects.filter(entry_type="production", date__year=today.year, date__month=today.month).exclude(bucket="rfm_ok_tyre").select_related("tyre_item")
 
-    # Assuming no pagination logic for now as it's not strictly required in standard response size and complexity might break exactness without DRF paginator setup. We will return all matching.
-    
     data_list = []
     
     totals = {
@@ -603,6 +622,7 @@ def production_sheet(request):
         for entry in entries:
             rfm = DailyEntry.objects.filter(entry_type="adjustment", bucket="rfm_ok_tyre", date=entry.date, tyre_item=entry.tyre_item).aggregate(Sum("quantity"))['quantity__sum'] or 0
             data_list.append({
+                "sku": entry.tyre_item.sku or "",
                 "tyre_name": str(entry.tyre_item),
                 "all_curing": entry.all_curing,
                 "production_tyre": entry.production_tyre,
@@ -621,15 +641,6 @@ def production_sheet(request):
             totals["lose_tyre"] += entry.lose_tyre
             totals["packing"] += entry.quantity
             totals["rfm_adjustment"] += rfm
-            
-            labels.append(str(entry.tyre_item))
-            curing_data.append(entry.all_curing)
-            packing_data.append(entry.quantity)
-            repair_data.append(entry.repair)
-            second_data.append(entry.second_grade)
-            third_data.append(entry.third_grade)
-            lose_data.append(entry.lose_tyre)
-            
     else:
         # aggregate by tyre item
         tyre_aggregates = {}
@@ -637,6 +648,7 @@ def production_sheet(request):
             tid = entry.tyre_item.id
             if tid not in tyre_aggregates:
                 tyre_aggregates[tid] = {
+                    "sku": entry.tyre_item.sku or "",
                     "tyre_name": str(entry.tyre_item),
                     "all_curing": 0,
                     "production_tyre": 0,
@@ -657,6 +669,7 @@ def production_sheet(request):
             tyre_aggregates[tid]["packing"] += entry.quantity
 
         # Aggregate monthly RFM adjustments
+        today = datetime.date.today()
         if month_param:
             try:
                 y, m = month_param.split("-")
@@ -672,6 +685,7 @@ def production_sheet(request):
                 tyre_aggregates[tid]["rfm_adjustment"] += r_entry.quantity
             else:
                 tyre_aggregates[tid] = {
+                    "sku": r_entry.tyre_item.sku if r_entry.tyre_item else "",
                     "tyre_name": str(r_entry.tyre_item),
                     "all_curing": 0, "production_tyre": 0, "repair": 0,
                     "second_grade": 0, "third_grade": 0, "lose_tyre": 0,
@@ -683,13 +697,16 @@ def production_sheet(request):
             for k in totals.keys():
                 totals[k] += agg.get(k, 0)
                 
-            labels.append(agg["tyre_name"])
-            curing_data.append(agg["all_curing"])
-            packing_data.append(agg["packing"])
-            repair_data.append(agg["repair"])
-            second_data.append(agg["second_grade"])
-            third_data.append(agg["third_grade"])
-            lose_data.append(agg["lose_tyre"])
+    data_list.sort(key=lambda x: sku_sort_key(x.get("sku", ""), x.get("tyre_name", "")))
+
+    for agg in data_list:
+        labels.append(agg["tyre_name"])
+        curing_data.append(agg["all_curing"])
+        packing_data.append(agg["packing"])
+        repair_data.append(agg["repair"])
+        second_data.append(agg["second_grade"])
+        third_data.append(agg["third_grade"])
+        lose_data.append(agg["lose_tyre"])
             
     return Response({
         "data": data_list,
@@ -705,16 +722,16 @@ def production_sheet(request):
         }
     })
 
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def export_production_sheet(request):
     """
-    Export date-wise item production for Auto Tyre with ALL columns:
-    All Curing, Production, Repair, 2nd Grade, 3rd Grade, Lose Tyre, RFM Adj, Packing.
-    Includes:
-      1. Date-Wise Production (detailed daily ledger)
-      2. Daily Matrix (1-31) (calendar grid with 8 sub-columns per day)
-      3. Monthly Summary (item consolidated totals)
+    Export date-wise item production for Auto Tyre (3 sheets):
+      1. Daily Matrix (1-31) - Calendar grid with 8 sub-columns per day
+      2. Monthly Summary - Item consolidated totals with weights
+      3. Date-Wise Production - Detailed daily ledger
+    Sorted strictly by coding (SKU).
     """
     import calendar
     from io import BytesIO
@@ -746,20 +763,20 @@ def export_production_sheet(request):
 
     _, num_days = calendar.monthrange(year, month)
     month_name = calendar.month_name[month].upper()
-
-    wb = openpyxl.Workbook()
-    wb.remove(wb.active)  # remove default sheet
+    label = f"{date_param}" if is_single_date else f"{month_name} {year}"
 
     # Typography & Styles
-    f_title = Font(name="Calibri", size=16, bold=True, color="1E3A8A")
-    f_sub = Font(name="Calibri", size=11, bold=False, color="475569")
-    f_heading = Font(name="Calibri", size=12, bold=True, color="0F172A")
-    f_tbl_hdr = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
-    f_data = Font(name="Calibri", size=10)
-    f_bold = Font(name="Calibri", size=10, bold=True)
-    f_tot = Font(name="Calibri", size=11, bold=True, color="0F172A")
+    f_title = Font(name="Calibri", size=15, bold=True, color="FFFFFF")
+    f_sub = Font(name="Calibri", size=10, bold=False, color="FFFFFF")
+    f_heading = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+    f_tbl_hdr = Font(name="Calibri", size=9, bold=True, color="FFFFFF")
+    f_data = Font(name="Calibri", size=9)
+    f_bold = Font(name="Calibri", size=9, bold=True)
+    f_tot = Font(name="Calibri", size=10, bold=True, color="0F172A")
 
     fill_hdr = PatternFill(start_color="1E3A8A", end_color="1E3A8A", fill_type="solid")
+    fill_sub = PatternFill(start_color="2D6A9F", end_color="2D6A9F", fill_type="solid")
+    fill_day = PatternFill(start_color="154360", end_color="154360", fill_type="solid")
     fill_zebra = PatternFill(start_color="F8FAFC", end_color="F8FAFC", fill_type="solid")
     fill_tot = PatternFill(start_color="E2E8F0", end_color="E2E8F0", fill_type="solid")
 
@@ -768,25 +785,21 @@ def export_production_sheet(request):
     al_right = Alignment(horizontal="right", vertical="center")
 
     thin = Side(border_style="thin", color="CBD5E1")
-    medium = Side(border_style="medium", color="1E3A8A")
     double = Side(border_style="double", color="1E3A8A")
-
     border_cell = Border(left=thin, right=thin, top=thin, bottom=thin)
     border_tot = Border(left=thin, right=thin, top=thin, bottom=double)
-    border_hdr = Border(left=thin, right=thin, top=medium, bottom=medium)
 
-    # Fetch Production Entries
     if is_single_date:
         entries_qs = DailyEntry.objects.filter(
             entry_type='production', date=date_param
-        ).exclude(bucket='rfm_ok_tyre').select_related('tyre_item').order_by('tyre_item__id')
+        ).exclude(bucket='rfm_ok_tyre').select_related('tyre_item')
         rfm_qs = DailyEntry.objects.filter(
             entry_type='adjustment', bucket='rfm_ok_tyre', date=date_param
         )
     else:
         entries_qs = DailyEntry.objects.filter(
             entry_type='production', date__year=year, date__month=month
-        ).exclude(bucket='rfm_ok_tyre').select_related('tyre_item').order_by('date', 'tyre_item__id')
+        ).exclude(bucket='rfm_ok_tyre').select_related('tyre_item')
         rfm_qs = DailyEntry.objects.filter(
             entry_type='adjustment', bucket='rfm_ok_tyre', date__year=year, date__month=month
         )
@@ -794,152 +807,220 @@ def export_production_sheet(request):
     entries = list(entries_qs)
     rfm_map = {}
     for r in rfm_qs:
-        key = (r.date, r.tyre_item_id)
+        key = (r.date.day, r.tyre_item_id)
         rfm_map[key] = rfm_map.get(key, 0) + r.quantity
 
-    all_items = list(TyreItem.objects.filter(is_active=True).order_by('id'))
+    all_items = sorted(
+        TyreItem.objects.filter(is_active=True),
+        key=lambda x: sku_sort_key(x.sku, f"{x.tyre} {x.pattern}")
+    )
 
-    # =============================================================
-    # SHEET 1: Date-Wise Production (Detailed Ledger)
-    # =============================================================
-    ws1 = wb.create_sheet(title="Date-Wise Production")
+    prod_day_map = {}
+    for e in entries:
+        key = (e.tyre_item_id, e.date.day)
+        if key not in prod_day_map:
+            prod_day_map[key] = {
+                "all_curing": 0, "production": 0, "repair": 0, "second": 0,
+                "third": 0, "lose": 0, "packing": 0
+            }
+        prod_day_map[key]["all_curing"] += e.all_curing
+        prod_day_map[key]["production"] += e.production_tyre
+        prod_day_map[key]["repair"] += e.repair
+        prod_day_map[key]["second"] += e.second_grade
+        prod_day_map[key]["third"] += e.third_grade
+        prod_day_map[key]["lose"] += e.lose_tyre
+        prod_day_map[key]["packing"] += e.quantity
+
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+
+    # ════════════════════════════════════════════════════════════════════════════════
+    # SHEET 1: Daily Matrix (1-31)
+    # ════════════════════════════════════════════════════════════════════════════════
+    ws1 = wb.create_sheet("Daily Matrix (1-31)")
     ws1.views.sheetView[0].showGridLines = True
 
-    ws1.merge_cells("A1:M1")
-    ws1["A1"] = "RADHU INDUSTRIES"
-    ws1["A1"].font = f_title
-    ws1["A1"].alignment = al_center
+    sub_cols = ["Curing", "Prod", "Rep", "2nd", "3rd", "Lose", "RFM", "Pack"]
+    num_sub = len(sub_cols)  # 8
+    tot_start_col = 6 + num_days * num_sub
+    last_col = tot_start_col + num_sub  # 8 metrics + Total Kgs = +8
 
-    ws1.merge_cells("A2:M2")
-    ws1["A2"] = "17/5 MILE STONE DELHI MEERUT ROAD MURAD NAGAR U.P.-201206"
-    ws1["A2"].font = f_sub
-    ws1["A2"].alignment = al_center
+    # Title Banner
+    ws1.merge_cells(start_row=1, start_column=1, end_row=1, end_column=last_col)
+    c1 = ws1.cell(1, 1, "RADHU INDUSTRIES")
+    c1.font = f_title; c1.fill = fill_hdr; c1.alignment = al_center
+    ws1.row_dimensions[1].height = 28
 
-    ws1.merge_cells("A3:M3")
-    title_text = f"AUTOMOTIVE TYRE - DATE WISE PRODUCTION SHEET | {date_param}" if is_single_date else f"AUTOMOTIVE TYRE - DATE WISE PRODUCTION SHEET | {month_name} {year}"
-    ws1["A3"] = title_text
-    ws1["A3"].font = f_heading
-    ws1["A3"].alignment = al_center
+    ws1.merge_cells(start_row=2, start_column=1, end_row=2, end_column=last_col)
+    c2 = ws1.cell(2, 1, "17/5 MILE STONE DELHI MEERUT ROAD MURAD NAGAR U.P.-201206")
+    c2.font = f_sub; c2.fill = fill_sub; c2.alignment = al_center
+    ws1.row_dimensions[2].height = 18
 
-    headers1 = [
-        "Date", "Tyre Item", "Type", "All Curing", "Production", "Repair",
-        "2nd Grade", "3rd Grade", "Lose Tyre", "RFM Adj", "Packing", "Weight (Kg)", "Total Kgs"
-    ]
+    ws1.merge_cells(start_row=3, start_column=1, end_row=3, end_column=last_col)
+    c3 = ws1.cell(3, 1, f"AUTOMOTIVE TYRE — DATE-WISE PRODUCTION MATRIX | {label}")
+    c3.font = f_heading; c3.fill = fill_hdr; c3.alignment = al_center
+    ws1.row_dimensions[3].height = 22
 
-    ws1.row_dimensions[5].height = 26
-    for c_idx, h_text in enumerate(headers1, 1):
-        cell = ws1.cell(5, c_idx, h_text)
-        cell.font = f_tbl_hdr
-        cell.fill = fill_hdr
-        cell.alignment = al_center
-        cell.border = border_hdr
+    # Row 4: Dates Header
+    ws1.merge_cells("A4:E4")
+    ws1.cell(4, 1, "ITEM DETAILS").font = f_tbl_hdr
+    ws1.cell(4, 1).fill = fill_hdr; ws1.cell(4, 1).alignment = al_center
 
-    row_idx = 6
-    if entries:
-        for e in entries:
-            rfm_val = rfm_map.get((e.date, e.tyre_item_id), 0)
-            item_obj = e.tyre_item
-            weight_val = float(item_obj.weight or 0)
-            packing_val = e.quantity
+    for d in range(1, num_days + 1):
+        sc = 6 + (d - 1) * num_sub
+        ec = sc + num_sub - 1
+        ws1.merge_cells(start_row=4, start_column=sc, end_row=4, end_column=ec)
+        dt_cell = ws1.cell(4, sc, f"{d:02d}-{month_name[:3]}")
+        dt_cell.font = f_tbl_hdr; dt_cell.fill = fill_day; dt_cell.alignment = al_center
 
-            ws1.cell(row_idx, 1, e.date.strftime("%d-%m-%Y")).alignment = al_center
-            ws1.cell(row_idx, 2, f"{item_obj.tyre} {item_obj.pattern}").alignment = al_left
-            ws1.cell(row_idx, 3, item_obj.type).alignment = al_center
-            ws1.cell(row_idx, 4, e.all_curing).alignment = al_right
-            ws1.cell(row_idx, 5, e.production_tyre).alignment = al_right
-            ws1.cell(row_idx, 6, e.repair).alignment = al_right
-            ws1.cell(row_idx, 7, e.second_grade).alignment = al_right
-            ws1.cell(row_idx, 8, e.third_grade).alignment = al_right
-            ws1.cell(row_idx, 9, e.lose_tyre).alignment = al_right
-            ws1.cell(row_idx, 10, rfm_val).alignment = al_right
-            ws1.cell(row_idx, 11, packing_val).alignment = al_right
-            ws1.cell(row_idx, 12, weight_val).alignment = al_right
-            ws1.cell(row_idx, 13, f"=K{row_idx}*L{row_idx}").alignment = al_right
+    ws1.merge_cells(start_row=4, start_column=tot_start_col, end_row=4, end_column=last_col)
+    tot_banner = ws1.cell(4, tot_start_col, "MONTHLY TOTALS")
+    tot_banner.font = f_tbl_hdr; tot_banner.fill = fill_hdr; tot_banner.alignment = al_center
 
-            for col in range(1, 14):
-                ws1.cell(row_idx, col).border = border_cell
-                ws1.cell(row_idx, col).font = f_data
-            row_idx += 1
-    else:
-        # If no entries, list active items with zeros so sheet is never empty
-        for item_obj in all_items:
-            weight_val = float(item_obj.weight or 0)
-            ws1.cell(row_idx, 1, f"01-{month:02d}-{year}").alignment = al_center
-            ws1.cell(row_idx, 2, f"{item_obj.tyre} {item_obj.pattern}").alignment = al_left
-            ws1.cell(row_idx, 3, item_obj.type).alignment = al_center
-            for col in range(4, 12):
-                ws1.cell(row_idx, col, 0).alignment = al_right
-            ws1.cell(row_idx, 12, weight_val).alignment = al_right
-            ws1.cell(row_idx, 13, f"=K{row_idx}*L{row_idx}").alignment = al_right
+    # Row 5: Column Sub-headers
+    ws1.row_dimensions[5].height = 20
+    fixed_hdrs = ["#", "CODE", "TYRE ITEM", "PATTERN", "TYPE"]
+    for ci, h in enumerate(fixed_hdrs, 1):
+        c = ws1.cell(5, ci, h)
+        c.font = f_tbl_hdr; c.fill = fill_hdr; c.alignment = al_center; c.border = border_cell
 
-            for col in range(1, 14):
-                ws1.cell(row_idx, col).border = border_cell
-                ws1.cell(row_idx, col).font = f_data
-            row_idx += 1
+    for d in range(1, num_days + 1):
+        sc = 6 + (d - 1) * num_sub
+        for sub_idx, sub_label in enumerate(sub_cols):
+            col = sc + sub_idx
+            c = ws1.cell(5, col, sub_label)
+            c.font = Font(name="Calibri", size=8, bold=True, color="FFFFFF")
+            c.fill = fill_sub; c.alignment = al_center; c.border = border_cell
 
-    # Total Row for Sheet 1
-    ws1.merge_cells(f"A{row_idx}:C{row_idx}")
-    ws1.cell(row_idx, 1, "TOTAL  :").alignment = al_center
-    ws1.cell(row_idx, 1).font = f_tot
+    for idx, h_tot in enumerate(["CURING", "PROD", "REPAIR", "2ND", "3RD", "LOSE", "RFM", "PACK", "TOTAL KGS"]):
+        col = tot_start_col + idx
+        c = ws1.cell(5, col, h_tot)
+        c.font = f_tbl_hdr; c.fill = fill_hdr; c.alignment = al_center; c.border = border_cell
 
-    for col in range(4, 12):
-        col_letter = get_column_letter(col)
-        c = ws1.cell(row_idx, col, f"=SUM({col_letter}6:{col_letter}{row_idx-1})")
-        c.font = f_tot
-        c.alignment = al_right
+    # Fill Rows
+    r_idx = 6
+    for idx, item in enumerate(all_items, 1):
+        rf = fill_zebra if idx % 2 == 0 else PatternFill("solid", fgColor="FFFFFF")
+        ws1.row_dimensions[r_idx].height = 18
 
-    ws1.cell(row_idx, 12, "") # Weight blank in total
-    ws1.cell(row_idx, 13, f"=SUM(M6:M{row_idx-1})").alignment = al_right
-    ws1.cell(row_idx, 13).font = f_tot
+        ws1.cell(r_idx, 1, idx).alignment = al_center
+        ws1.cell(r_idx, 2, item.sku or "").alignment = al_center
+        ws1.cell(r_idx, 3, item.tyre or "").alignment = al_left
+        ws1.cell(r_idx, 4, item.pattern or "").alignment = al_left
+        ws1.cell(r_idx, 5, item.type or "").alignment = al_center
 
-    for col in range(1, 14):
-        ws1.cell(row_idx, col).border = border_tot
-        ws1.cell(row_idx, col).fill = fill_tot
+        for c in range(1, 6):
+            cell = ws1.cell(r_idx, c)
+            cell.font = f_bold if c == 2 else f_data
+            cell.fill = rf; cell.border = border_cell
 
-    col_widths1 = [13, 26, 8, 12, 12, 10, 11, 11, 11, 11, 11, 12, 14]
-    for idx, w in enumerate(col_widths1, 1):
-        ws1.column_dimensions[get_column_letter(idx)].width = w
+        for d in range(1, num_days + 1):
+            sc = 6 + (d - 1) * num_sub
+            pvals = prod_day_map.get((item.id, d), {})
+            rfm_v = rfm_map.get((d, item.id), 0)
 
-    # =============================================================
-    # SHEET 2: Monthly Summary (Consolidated by Tyre Item)
-    # =============================================================
-    ws2 = wb.create_sheet(title="Monthly Summary")
+            day_vals = [
+                pvals.get("all_curing", 0),
+                pvals.get("production", 0),
+                pvals.get("repair", 0),
+                pvals.get("second", 0),
+                pvals.get("third", 0),
+                pvals.get("lose", 0),
+                rfm_v,
+                pvals.get("packing", 0),
+            ]
+
+            for s_idx, val in enumerate(day_vals):
+                col = sc + s_idx
+                cell_v = ws1.cell(r_idx, col, val if val > 0 else None)
+                cell_v.alignment = al_right
+                cell_v.border = border_cell
+                cell_v.fill = rf
+                if val > 0:
+                    cell_v.font = Font(name="Calibri", size=9, bold=(s_idx in [0, 7]))
+
+        # Row Totals for the 8 metrics
+        for s_idx in range(num_sub):
+            c_cells = [f"{get_column_letter(6 + (d - 1) * num_sub + s_idx)}{r_idx}" for d in range(1, num_days + 1)]
+            col_tot = tot_start_col + s_idx
+            c = ws1.cell(r_idx, col_tot, f"={'+'.join(c_cells)}")
+            c.font = f_bold; c.alignment = al_right; c.border = border_cell; c.fill = fill_zebra
+
+        # Total Kgs = Packing total * weight
+        pack_col_let = get_column_letter(tot_start_col + 7)
+        w_val = float(item.weight or 0)
+        c_tot_kg = ws1.cell(r_idx, last_col, f"={pack_col_let}{r_idx}*{w_val}")
+        c_tot_kg.font = f_bold; c_tot_kg.alignment = al_right; c_tot_kg.border = border_cell; c_tot_kg.fill = fill_zebra
+
+        r_idx += 1
+
+    # Footer Total Row
+    foot_row = r_idx
+    ws1.row_dimensions[foot_row].height = 22
+    ws1.merge_cells(f"A{foot_row}:E{foot_row}")
+    f_lbl = ws1.cell(foot_row, 1, "TOTAL PRODUCTION")
+    f_lbl.font = f_tot; f_lbl.alignment = al_center; f_lbl.fill = fill_tot
+
+    for col in range(1, last_col + 1):
+        c = ws1.cell(foot_row, col)
+        c.border = border_tot
+        c.fill = fill_tot
+
+    for col in range(6, last_col + 1):
+        col_let = get_column_letter(col)
+        c = ws1.cell(foot_row, col, f"=SUM({col_let}6:{col_let}{foot_row - 1})")
+        c.font = f_tot; c.alignment = al_right
+
+    ws1.column_dimensions["A"].width = 5
+    ws1.column_dimensions["B"].width = 9   # CODE column
+    ws1.column_dimensions["C"].width = 16
+    ws1.column_dimensions["D"].width = 16
+    ws1.column_dimensions["E"].width = 8
+
+    for d in range(1, num_days + 1):
+        sc = 6 + (d - 1) * num_sub
+        for s_idx in range(num_sub):
+            ws1.column_dimensions[get_column_letter(sc + s_idx)].width = 6
+
+    for ci in range(tot_start_col, last_col + 1):
+        ws1.column_dimensions[get_column_letter(ci)].width = 10
+
+    # ════════════════════════════════════════════════════════════════════════════════
+    # SHEET 2: Monthly Summary
+    # ════════════════════════════════════════════════════════════════════════════════
+    ws2 = wb.create_sheet("Monthly Summary")
     ws2.views.sheetView[0].showGridLines = True
 
-    ws2.merge_cells("A1:M1")
-    ws2["A1"] = "RADHU INDUSTRIES"
-    ws2["A1"].font = f_title
-    ws2["A1"].alignment = al_center
+    ws2.merge_cells("A1:O1")
+    c1 = ws2.cell(1, 1, "RADHU INDUSTRIES")
+    c1.font = f_title; c1.fill = fill_hdr; c1.alignment = al_center
+    ws2.row_dimensions[1].height = 28
 
-    ws2.merge_cells("A2:M2")
-    ws2["A2"] = "17/5 MILE STONE DELHI MEERUT ROAD MURAD NAGAR U.P.-201206"
-    ws2["A2"].font = f_sub
-    ws2["A2"].alignment = al_center
+    ws2.merge_cells("A2:O2")
+    c2 = ws2.cell(2, 1, "17/5 MILE STONE DELHI MEERUT ROAD MURAD NAGAR U.P.-201206")
+    c2.font = f_sub; c2.fill = fill_sub; c2.alignment = al_center
+    ws2.row_dimensions[2].height = 18
 
-    ws2.merge_cells("A3:M3")
-    ws2["A3"] = f"AUTOMOTIVE TYRE - MONTHLY PRODUCTION SUMMARY | {month_name} {year}"
-    ws2["A3"].font = f_heading
-    ws2["A3"].alignment = al_center
+    ws2.merge_cells("A3:O3")
+    c3 = ws2.cell(3, 1, f"AUTOMOTIVE TYRE — MONTHLY PRODUCTION SUMMARY | {label}")
+    c3.font = f_heading; c3.fill = fill_hdr; c3.alignment = al_center
+    ws2.row_dimensions[3].height = 22
 
-    headers2 = [
-        "Tyre Item", "Pattern", "Type", "All Curing", "Production", "Repair",
-        "2nd Grade", "3rd Grade", "Lose Tyre", "RFM Adj", "Packing", "Weight (Kg)", "Total Kgs."
+    sum_hdrs = [
+        "#", "CODE", "TYRE ITEM", "PATTERN", "TYPE", "ALL CURING", "PRODUCTION", "REPAIR",
+        "2ND GRADE", "3RD GRADE", "LOSE TYRE", "RFM ADJ", "PACKING", "WEIGHT (KG)", "TOTAL KGS"
     ]
+    ws2.row_dimensions[5].height = 22
+    for ci, h in enumerate(sum_hdrs, 1):
+        c = ws2.cell(5, ci, h)
+        c.font = f_tbl_hdr; c.fill = fill_hdr; c.alignment = al_center; c.border = border_cell
 
-    ws2.row_dimensions[5].height = 26
-    for c_idx, h_text in enumerate(headers2, 1):
-        cell = ws2.cell(5, c_idx, h_text)
-        cell.font = f_tbl_hdr
-        cell.fill = fill_hdr
-        cell.alignment = al_center
-        cell.border = border_hdr
-
-    # Map month entries by item
+    # Aggregate totals by item
     item_agg = {}
-    for item_obj in all_items:
-        item_agg[item_obj.id] = {
+    for item in all_items:
+        item_agg[item.id] = {
             "all_curing": 0, "production": 0, "repair": 0, "second": 0,
-            "third": 0, "lose": 0, "rfm": 0, "packing": 0
+            "third": 0, "lose": 0, "packing": 0, "rfm": 0
         }
 
     for e in entries:
@@ -957,249 +1038,158 @@ def export_production_sheet(request):
         if tid in item_agg:
             item_agg[tid]["rfm"] += qty
 
-    r2 = 6
-    for item_obj in all_items:
-        agg = item_agg[item_obj.id]
-        weight_val = float(item_obj.weight or 0)
+    r2_idx = 6
+    for idx, item in enumerate(all_items, 1):
+        rf = fill_zebra if idx % 2 == 0 else PatternFill("solid", fgColor="FFFFFF")
+        ws2.row_dimensions[r2_idx].height = 18
+        agg = item_agg[item.id]
+        w_val = float(item.weight or 0)
 
-        ws2.cell(r2, 1, item_obj.tyre).alignment = al_left
-        ws2.cell(r2, 2, item_obj.pattern).alignment = al_left
-        ws2.cell(r2, 3, item_obj.type).alignment = al_center
-        ws2.cell(r2, 4, agg["all_curing"]).alignment = al_right
-        ws2.cell(r2, 5, agg["production"]).alignment = al_right
-        ws2.cell(r2, 6, agg["repair"]).alignment = al_right
-        ws2.cell(r2, 7, agg["second"]).alignment = al_right
-        ws2.cell(r2, 8, agg["third"]).alignment = al_right
-        ws2.cell(r2, 9, agg["lose"]).alignment = al_right
-        ws2.cell(r2, 10, agg["rfm"]).alignment = al_right
-        ws2.cell(r2, 11, agg["packing"]).alignment = al_right
-        ws2.cell(r2, 12, weight_val).alignment = al_right
-        ws2.cell(r2, 13, f"=K{r2}*L{r2}").alignment = al_right
-
-        for col in range(1, 14):
-            ws2.cell(r2, col).border = border_cell
-            ws2.cell(r2, col).font = f_data
-        r2 += 1
-
-    # Total row in sheet 2
-    ws2.merge_cells(f"A{r2}:C{r2}")
-    ws2.cell(r2, 1, "TOTAL  :").alignment = al_center
-    ws2.cell(r2, 1).font = f_tot
-    for col in range(4, 12):
-        col_letter = get_column_letter(col)
-        ws2.cell(r2, col, f"=SUM({col_letter}6:{col_letter}{r2-1})").alignment = al_right
-        ws2.cell(r2, col).font = f_tot
-
-    ws2.cell(r2, 12, "")
-    ws2.cell(r2, 13, f"=SUM(M6:M{r2-1})").alignment = al_right
-    ws2.cell(r2, 13).font = f_tot
-
-    for col in range(1, 14):
-        ws2.cell(r2, col).border = border_tot
-        ws2.cell(r2, col).fill = fill_tot
-
-    col_widths2 = [16, 18, 8, 12, 12, 10, 11, 11, 11, 11, 11, 12, 14]
-    for idx, w in enumerate(col_widths2, 1):
-        ws2.column_dimensions[get_column_letter(idx)].width = w
-
-    # =============================================================
-    # SHEET 3: Daily Matrix (1-31 with 8 columns per day)
-    # =============================================================
-    ws3 = wb.create_sheet(title="Daily Matrix (1-31)")
-    ws3.views.sheetView[0].showGridLines = True
-
-    sub_cols = ["All Curing", "Production", "Repair", "2nd Grade", "3rd Grade", "Lose Tyre", "RFM Adj", "Packing"]
-    num_sub = len(sub_cols) # 8
-    tot_start = 6 + 31 * num_sub
-    tot_end = tot_start + num_sub + 1
-
-    ws3.merge_cells("C1:CV1")
-    ws3["C1"] = "RADHU INDUSTRIES"
-    ws3["C1"].font = f_title
-    ws3["C1"].alignment = al_center
-
-    ws3.merge_cells("C2:CV2")
-    ws3["C2"] = "17/5 MILE STONE DELHI MEERUT ROAD MURAD NAGAR U.P.-201206"
-    ws3["C2"].font = f_sub
-    ws3["C2"].alignment = al_center
-
-    # Row 4: Dated | Day 1..31 | TOTAL AUTO TYRE
-    ws3.merge_cells("B4:E4")
-    ws3["B4"] = "Dated"
-    ws3["B4"].font = f_heading
-    ws3["B4"].alignment = al_center
-    for c_idx in range(2, 6):
-        ws3.cell(4, c_idx).border = border_hdr
-
-    for day in range(1, 32):
-        start_col = 6 + (day - 1) * num_sub
-        end_col = start_col + num_sub - 1
-        s_letter = get_column_letter(start_col)
-        e_letter = get_column_letter(end_col)
-        ws3.merge_cells(f"{s_letter}4:{e_letter}4")
-        cell = ws3[f"{s_letter}4"]
-        cell.value = f"Dated: {day:02d}" if day <= num_days else f"Day {day}"
-        cell.font = f_heading
-        cell.alignment = al_center
-        for c_idx in range(start_col, end_col + 1):
-            ws3.cell(4, c_idx).border = border_hdr
-
-    ws3.merge_cells(f"{get_column_letter(tot_start)}4:{get_column_letter(tot_end)}4")
-    ws3[f"{get_column_letter(tot_start)}4"] = "TOTAL AUTO TYRE"
-    ws3[f"{get_column_letter(tot_start)}4"].font = f_heading
-    ws3[f"{get_column_letter(tot_start)}4"].alignment = al_center
-    for c_idx in range(tot_start, tot_end + 1):
-        ws3.cell(4, c_idx).border = border_hdr
-
-    # Row 5: MONTH OF | PRODUCTION ...
-    ws3.merge_cells("B5:E5")
-    ws3["B5"] = f"MONTH OF : {month_name}-{year}"
-    ws3["B5"].font = f_heading
-    ws3["B5"].alignment = al_center
-    for c_idx in range(2, 6):
-        ws3.cell(5, c_idx).border = border_hdr
-
-    for day in range(1, 32):
-        start_col = 6 + (day - 1) * num_sub
-        end_col = start_col + num_sub - 1
-        s_letter = get_column_letter(start_col)
-        e_letter = get_column_letter(end_col)
-        ws3.merge_cells(f"{s_letter}5:{e_letter}5")
-        ws3[f"{s_letter}5"] = "PRODUCTION"
-        ws3[f"{s_letter}5"].font = f_bold
-        ws3[f"{s_letter}5"].alignment = al_center
-        for c_idx in range(start_col, end_col + 1):
-            ws3.cell(5, c_idx).border = border_hdr
-
-    ws3.merge_cells(f"{get_column_letter(tot_start)}5:{get_column_letter(tot_start + num_sub - 1)}5")
-    ws3[f"{get_column_letter(tot_start)}5"] = "PRODUCTION TOTAL"
-    ws3[f"{get_column_letter(tot_start)}5"].font = f_bold
-    ws3[f"{get_column_letter(tot_start)}5"].alignment = al_center
-
-    ws3.cell(5, tot_end - 1, "WEIGHT").font = f_bold
-    ws3.cell(5, tot_end, "TOTAL Kgs.").font = f_bold
-
-    # Row 6: Sub-headers
-    ws3.merge_cells("B6:D6")
-    ws3["B6"] = "AUTOMOTIVE TYRE"
-    ws3["B6"].font = f_bold
-    ws3["B6"].alignment = al_center
-    ws3["E6"] = "Type"
-    ws3["E6"].font = f_bold
-    ws3["E6"].alignment = al_center
-    for c_idx in range(2, 6):
-        ws3.cell(6, c_idx).border = border_hdr
-
-    for day in range(1, 32):
-        start_col = 6 + (day - 1) * num_sub
-        for sub_idx, sub_name in enumerate(sub_cols):
-            c = ws3.cell(6, start_col + sub_idx, sub_name)
-            c.font = Font(name="Calibri", size=9, bold=True)
-            c.alignment = al_center
-            c.border = border_hdr
-
-    for sub_idx, sub_name in enumerate(sub_cols):
-        c = ws3.cell(6, tot_start + sub_idx, f"Tot {sub_name}")
-        c.font = Font(name="Calibri", size=9, bold=True)
-        c.alignment = al_center
-        c.border = border_hdr
-
-    ws3.cell(6, tot_end - 1, "WEIGHT").font = Font(name="Calibri", size=9, bold=True)
-    ws3.cell(6, tot_end, "TOTAL Kgs.").font = Font(name="Calibri", size=9, bold=True)
-    ws3.cell(6, tot_end - 1).border = border_hdr
-    ws3.cell(6, tot_end).border = border_hdr
-
-    # Populate item entries in Daily Matrix
-    # Day matrix data map: (item_id, day) -> dict of 8 values
-    day_matrix_map = {}
-    for e in entries:
-        tid = e.tyre_item_id
-        d = e.date.day
-        rfm_val = rfm_map.get((e.date, tid), 0)
-        day_matrix_map[(tid, d)] = [
-            e.all_curing, e.production_tyre, e.repair, e.second_grade,
-            e.third_grade, e.lose_tyre, rfm_val, e.quantity
+        vals2 = [
+            idx,
+            item.sku or "",
+            item.tyre or "",
+            item.pattern or "",
+            item.type or "",
+            agg["all_curing"] if agg["all_curing"] > 0 else None,
+            agg["production"] if agg["production"] > 0 else None,
+            agg["repair"] if agg["repair"] > 0 else None,
+            agg["second"] if agg["second"] > 0 else None,
+            agg["third"] if agg["third"] > 0 else None,
+            agg["lose"] if agg["lose"] > 0 else None,
+            agg["rfm"] if agg["rfm"] > 0 else None,
+            agg["packing"] if agg["packing"] > 0 else None,
+            w_val,
+            f"=M{r2_idx}*N{r2_idx}"
         ]
 
-    r3 = 7
-    for item_idx, item_obj in enumerate(all_items, 1):
-        ws3.cell(r3, 2, item_idx).alignment = al_center
-        ws3.cell(r3, 3, item_obj.tyre).alignment = al_left
-        ws3.cell(r3, 4, item_obj.pattern).alignment = al_left
-        ws3.cell(r3, 5, item_obj.type).alignment = al_center
+        for ci, v in enumerate(vals2, 1):
+            c = ws2.cell(r2_idx, ci, v)
+            c.border = border_cell
+            c.fill = rf
+            c.font = f_bold if ci in [2, 6, 13, 15] else f_data
+            c.alignment = al_center if ci in [1, 2, 5] else (al_left if ci in [3, 4] else al_right)
 
-        for day in range(1, 32):
-            start_col = 6 + (day - 1) * num_sub
-            vals = day_matrix_map.get((item_obj.id, day), [0] * num_sub)
-            for sub_idx, val in enumerate(vals):
-                c = ws3.cell(r3, start_col + sub_idx, val if val > 0 else "")
-                c.alignment = al_right
-                c.font = f_data
-                c.border = border_cell
+        r2_idx += 1
 
-        # Row sum formulas for each of the 8 sub-columns
-        for sub_idx in range(num_sub):
-            cells = [f"{get_column_letter(6 + (d-1)*num_sub + sub_idx)}{r3}" for d in range(1, num_days + 1)]
-            tot_c = ws3.cell(r3, tot_start + sub_idx, f"={'+'.join(cells)}")
-            tot_c.font = f_bold
-            tot_c.alignment = al_right
-            tot_c.border = border_cell
+    ws2.merge_cells(f"A{r2_idx}:E{r2_idx}")
+    t2_lbl = ws2.cell(r2_idx, 1, "TOTALS")
+    t2_lbl.font = f_tot; t2_lbl.alignment = al_center; t2_lbl.fill = fill_tot
 
-        # Weight & Total Kgs
-        weight_val = float(item_obj.weight or 0)
-        ws3.cell(r3, tot_end - 1, weight_val).alignment = al_right
-        ws3.cell(r3, tot_end - 1).font = f_data
-        ws3.cell(r3, tot_end - 1).border = border_cell
+    for col in range(1, 16):
+        c = ws2.cell(r2_idx, col)
+        c.border = border_tot
+        c.fill = fill_tot
 
-        packing_tot_col = get_column_letter(tot_start + num_sub - 1)
-        weight_col = get_column_letter(tot_end - 1)
-        ws3.cell(r3, tot_end, f"={packing_tot_col}{r3}*{weight_col}{r3}").alignment = al_right
-        ws3.cell(r3, tot_end).font = f_bold
-        ws3.cell(r3, tot_end).border = border_cell
+    for col in range(6, 14):
+        col_let = get_column_letter(col)
+        c = ws2.cell(r2_idx, col, f"=SUM({col_let}6:{col_let}{r2_idx - 1})")
+        c.font = f_tot; c.alignment = al_right
 
-        for c_idx in range(2, 6):
-            ws3.cell(r3, c_idx).border = border_cell
-            ws3.cell(r3, c_idx).font = f_bold
+    ws2.cell(r2_idx, 15, f"=SUM(O6:O{r2_idx - 1})").font = f_tot
+    ws2.cell(r2_idx, 15).alignment = al_right
 
-        r3 += 1
+    col_w2 = [5, 9, 16, 16, 8, 12, 12, 10, 11, 11, 11, 11, 11, 12, 14]
+    for ci, w in enumerate(col_w2, 1):
+        ws2.column_dimensions[get_column_letter(ci)].width = w
 
-    # Total Row in Sheet 3
-    ws3.merge_cells(f"B{r3}:E{r3}")
-    ws3.cell(r3, 2, "TOTAL  :").alignment = al_center
-    ws3.cell(r3, 2).font = f_tot
+    # ════════════════════════════════════════════════════════════════════════════════
+    # SHEET 3: Date-Wise Production (Detailed Ledger)
+    # ════════════════════════════════════════════════════════════════════════════════
+    ws3 = wb.create_sheet("Date-Wise Production")
+    ws3.views.sheetView[0].showGridLines = True
 
-    for col in range(6, tot_end + 1):
-        col_letter = get_column_letter(col)
-        if col == tot_end - 1:
-            ws3.cell(r3, col, "") # skip weight in total
-        else:
-            ws3.cell(r3, col, f"=SUM({col_letter}7:{col_letter}{r3-1})").alignment = al_right
-        ws3.cell(r3, col).font = f_tot
-        ws3.cell(r3, col).border = border_tot
-        ws3.cell(r3, col).fill = fill_tot
+    ws3.merge_cells("A1:O1")
+    c1 = ws3.cell(1, 1, "RADHU INDUSTRIES")
+    c1.font = f_title; c1.fill = fill_hdr; c1.alignment = al_center
+    ws3.row_dimensions[1].height = 28
 
-    for c_idx in range(2, 6):
-        ws3.cell(r3, c_idx).border = border_tot
-        ws3.cell(r3, c_idx).fill = fill_tot
+    ws3.merge_cells("A2:O2")
+    c2 = ws3.cell(2, 1, "17/5 MILE STONE DELHI MEERUT ROAD MURAD NAGAR U.P.-201206")
+    c2.font = f_sub; c2.fill = fill_sub; c2.alignment = al_center
+    ws3.row_dimensions[2].height = 18
 
-    ws3.column_dimensions["A"].width = 3
-    ws3.column_dimensions["B"].width = 5
-    ws3.column_dimensions["C"].width = 16
-    ws3.column_dimensions["D"].width = 16
-    ws3.column_dimensions["E"].width = 8
+    ws3.merge_cells("A3:O3")
+    c3 = ws3.cell(3, 1, f"AUTOMOTIVE TYRE — DAILY PRODUCTION LOG | {label}")
+    c3.font = f_heading; c3.fill = fill_hdr; c3.alignment = al_center
+    ws3.row_dimensions[3].height = 22
+
+    led_hdrs = [
+        "Date", "CODE", "Tyre Item", "Pattern", "Type", "All Curing", "Production", "Repair",
+        "2nd Grade", "3rd Grade", "Lose Tyre", "RFM Adj", "Packing", "Weight (Kg)", "Total Kgs"
+    ]
+    ws3.row_dimensions[5].height = 22
+    for ci, h in enumerate(led_hdrs, 1):
+        c = ws3.cell(5, ci, h)
+        c.font = f_tbl_hdr; c.fill = fill_hdr; c.alignment = al_center; c.border = border_cell
+
+    sorted_entries = sorted(entries, key=lambda e: (e.date, sku_sort_key(e.tyre_item.sku if e.tyre_item else "", f"{e.tyre_item.tyre} {e.tyre_item.pattern}" if e.tyre_item else "")))
+    r3_idx = 6
+    for idx, e in enumerate(sorted_entries, 1):
+        rf = fill_zebra if idx % 2 == 0 else PatternFill("solid", fgColor="FFFFFF")
+        item = e.tyre_item
+        w_val = float(item.weight or 0) if item else 0
+        rfm_val = rfm_map.get((e.date.day, e.tyre_item_id), 0)
+
+        vals3 = [
+            e.date.strftime("%d-%m-%Y"),
+            item.sku if item else "",
+            item.tyre if item else "",
+            item.pattern if item else "",
+            item.type if item else "",
+            e.all_curing,
+            e.production_tyre,
+            e.repair,
+            e.second_grade,
+            e.third_grade,
+            e.lose_tyre,
+            rfm_val,
+            e.quantity,
+            w_val,
+            f"=M{r3_idx}*N{r3_idx}"
+        ]
+
+        for ci, v in enumerate(vals3, 1):
+            c = ws3.cell(r3_idx, ci, v)
+            c.border = border_cell
+            c.fill = rf
+            c.font = f_bold if ci in [2, 6, 13, 15] else f_data
+            c.alignment = al_center if ci in [1, 2, 5] else (al_left if ci in [3, 4] else al_right)
+
+        r3_idx += 1
+
+    if sorted_entries:
+        ws3.merge_cells(f"A{r3_idx}:E{r3_idx}")
+        t3_lbl = ws3.cell(r3_idx, 1, "TOTAL")
+        t3_lbl.font = f_tot; t3_lbl.alignment = al_center; t3_lbl.fill = fill_tot
+        for col in range(1, 16):
+            ws3.cell(r3_idx, col).border = border_tot
+            ws3.cell(r3_idx, col).fill = fill_tot
+        for col in range(6, 14):
+            col_let = get_column_letter(col)
+            c = ws3.cell(r3_idx, col, f"=SUM({col_let}6:{col_let}{r3_idx - 1})")
+            c.font = f_tot; c.alignment = al_right
+        ws3.cell(r3_idx, 15, f"=SUM(O6:O{r3_idx - 1})").font = f_tot
+        ws3.cell(r3_idx, 15).alignment = al_right
+
+    col_w3 = [12, 9, 16, 16, 8, 12, 12, 10, 11, 11, 11, 11, 11, 12, 14]
+    for ci, w in enumerate(col_w3, 1):
+        ws3.column_dimensions[get_column_letter(ci)].width = w
 
     output = BytesIO()
     wb.save(output)
     output.seek(0)
 
-    filename = f"AUTO_DATE_WISE_PRODUCTION_{date_param}.xlsx" if is_single_date else f"AUTO_DATE_WISE_PRODUCTION_{year}_{month:02d}.xlsx"
+    filename = f"AUTO_TYRE_PRODUCTION_{year}_{month:02d}.xlsx"
     response = HttpResponse(
         output.getvalue(),
         content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
     response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    response["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response["Pragma"] = "no-cache"
+    response["Expires"] = "0"
     return response
-
 
 production_sheet_export = export_production_sheet
 

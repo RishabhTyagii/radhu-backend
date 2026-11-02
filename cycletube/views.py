@@ -1,3 +1,4 @@
+import re
 import datetime
 from decimal import Decimal
 from django.db import models
@@ -767,6 +768,26 @@ def production_summary(request):
     )
 
 
+def sku_sort_key(sku, fallback=""):
+    """
+    Sorts codes alphanumerically like CTB1..CTB45, CTBRFM1, CTBRJ1, etc.
+    Items without code go to the end, ordered alphabetically by fallback.
+    """
+    if not sku:
+        return (1, 9999, str(fallback or "").upper())
+    sku_str = str(sku).strip().upper()
+    m = re.match(r"^([A-Z]+)(\d+)(.*)$", sku_str)
+    if m:
+        prefix, num, suffix = m.groups()
+        order = 0
+        if any(x in prefix for x in ["RJ", "RS", "RFM"]):
+            order = 2
+        return (order, prefix, int(num), suffix)
+    if sku_str.isdigit():
+        return (0, "", int(sku_str), "")
+    return (0, sku_str, 0, "")
+
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def production_sheet(request):
@@ -800,10 +821,12 @@ def production_sheet(request):
         if tid not in item_map:
             item_map[tid] = {
                 "id": tid,
+                "sku": e.tube_item.sku or "",
                 "tube_name": f"{e.tube_item.size} {e.tube_item.type} {e.tube_item.brand}".strip(),
-                "size": e.tube_item.size,
-                "type": e.tube_item.type,
-                "brand": e.tube_item.brand,
+                "size": e.tube_item.size or "",
+                "type": e.tube_item.type or "",
+                "brand": e.tube_item.brand or "",
+                "weight": float(e.tube_item.weight or 0.950),
                 "dates_data": {},
             }
 
@@ -822,7 +845,7 @@ def production_sheet(request):
         item_map[tid]["dates_data"][date_str]["total"] += q
 
     rows = list(item_map.values())
-    rows.sort(key=lambda x: (x["size"], x["type"], x["brand"]))
+    rows.sort(key=lambda x: sku_sort_key(x.get("sku", ""), x.get("tube_name", "")))
 
     return Response({
         "data": rows,
@@ -836,371 +859,389 @@ def production_sheet(request):
 @permission_classes([IsAuthenticated])
 def export_production_sheet(request):
     """
-    Export Cycle Tube production sheet as styled Excel workbook (3 sheets).
-    ?month=YYYY-MM  OR  ?date=YYYY-MM-DD
+    Export Cycle Tube production sheet as styled Excel workbook (3 sheets):
+      1. Daily Matrix (1-31) - Calendar grid with daily quantities
+      2. Monthly Summary - Item consolidated totals with weights
+      3. Date-Wise Production - Detailed daily entry ledger
+    Sorted strictly by coding (SKU).
     """
     import calendar
     from io import BytesIO
     import openpyxl
-    from openpyxl.styles import (
-        Font, PatternFill, Alignment, Border, Side, GradientFill
-    )
+    from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
     from openpyxl.utils import get_column_letter
     from django.http import HttpResponse
 
     today = datetime.date.today()
-    date_param = request.query_params.get("date")
-    month_param = request.query_params.get("month")
+    date_param = request.query_params.get("date", "").strip()
+    month_param = request.query_params.get("month", "").strip()
 
+    is_single_date = False
     if date_param:
         try:
-            target_date = datetime.datetime.strptime(date_param, "%Y-%m-%d").date()
-        except ValueError:
-            target_date = today
-        year, month_num = target_date.year, target_date.month
-        entries = CycleTubeEntry.objects.filter(
-            entry_type="production", date=target_date
-        ).exclude(bucket="rfm_stock").select_related("tube_item")
-        label = target_date.strftime("%d-%b-%Y")
-    elif month_param:
+            parts = date_param.split("-")
+            year, month = int(parts[0]), int(parts[1])
+            is_single_date = True
+        except (ValueError, IndexError):
+            year, month = today.year, today.month
+    elif month_param and month_param != "all":
         try:
             parts = month_param.split("-")
-            year, month_num = int(parts[0]), int(parts[1])
+            year, month = int(parts[0]), int(parts[1])
         except (ValueError, IndexError):
-            year, month_num = today.year, today.month
-        entries = CycleTubeEntry.objects.filter(
-            entry_type="production", date__year=year, date__month=month_num
-        ).exclude(bucket="rfm_stock").select_related("tube_item")
-        label = datetime.date(year, month_num, 1).strftime("%B %Y")
+            year, month = today.year, today.month
     else:
-        year, month_num = today.year, today.month
-        entries = CycleTubeEntry.objects.filter(
-            entry_type="production", date__year=year, date__month=month_num
-        ).exclude(bucket="rfm_stock").select_related("tube_item")
-        label = today.strftime("%B %Y")
+        year, month = today.year, today.month
 
-    days_in_month = calendar.monthrange(year, month_num)[1]
+    _, num_days = calendar.monthrange(year, month)
+    month_name = calendar.month_name[month].upper()
+    label = f"{date_param}" if is_single_date else f"{month_name} {year}"
 
-    # Build item_map: {tid: {info, days: {1..31: total_qty}, total, weight}}
-    item_map = {}
+    # Typography & Styles
+    f_title = Font(name="Calibri", size=15, bold=True, color="FFFFFF")
+    f_sub = Font(name="Calibri", size=10, bold=False, color="FFFFFF")
+    f_heading = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+    f_tbl_hdr = Font(name="Calibri", size=9, bold=True, color="FFFFFF")
+    f_data = Font(name="Calibri", size=9)
+    f_bold = Font(name="Calibri", size=9, bold=True)
+    f_tot = Font(name="Calibri", size=10, bold=True, color="0F172A")
+
+    fill_hdr = PatternFill(start_color="1E3A8A", end_color="1E3A8A", fill_type="solid")
+    fill_sub = PatternFill(start_color="2D6A9F", end_color="2D6A9F", fill_type="solid")
+    fill_day = PatternFill(start_color="154360", end_color="154360", fill_type="solid")
+    fill_zebra = PatternFill(start_color="F8FAFC", end_color="F8FAFC", fill_type="solid")
+    fill_tot = PatternFill(start_color="E2E8F0", end_color="E2E8F0", fill_type="solid")
+
+    al_center = Alignment(horizontal="center", vertical="center")
+    al_left = Alignment(horizontal="left", vertical="center")
+    al_right = Alignment(horizontal="right", vertical="center")
+
+    thin = Side(border_style="thin", color="CBD5E1")
+    double = Side(border_style="double", color="1E3A8A")
+    border_cell = Border(left=thin, right=thin, top=thin, bottom=thin)
+    border_tot = Border(left=thin, right=thin, top=thin, bottom=double)
+
+    if is_single_date:
+        entries = list(CycleTubeEntry.objects.filter(
+            entry_type='production', date=date_param
+        ).exclude(bucket="rfm_stock").select_related('tube_item', 'user'))
+    else:
+        entries = list(CycleTubeEntry.objects.filter(
+            entry_type='production', date__year=year, date__month=month
+        ).exclude(bucket="rfm_stock").select_related('tube_item', 'user'))
+
+    prod_data = {}
     for e in entries:
-        tid = e.tube_item.id
-        if tid not in item_map:
-            item_map[tid] = {
-                "sno": 0,
-                "tube_name": f"{e.tube_item.size} {e.tube_item.type} {e.tube_item.brand}".strip(),
-                "size": e.tube_item.size or "",
-                "type": e.tube_item.type or "",
-                "brand": e.tube_item.brand or "",
-                "weight": float(e.tube_item.weight or 0),
-                "days": {},
-                "total": 0,
-            }
-        day_num = e.date.day
-        item_map[tid]["days"][day_num] = item_map[tid]["days"].get(day_num, 0) + (e.quantity or 0)
-        item_map[tid]["total"] += (e.quantity or 0)
+        tid = e.tube_item_id
+        day = e.date.day
+        prod_data[(tid, day)] = prod_data.get((tid, day), 0) + (e.quantity or 0)
 
-    rows = sorted(item_map.values(), key=lambda x: (x["size"], x["type"], x["brand"]))
-    for i, r in enumerate(rows):
-        r["sno"] = i + 1
-        r["total_kgs"] = round(r["total"] * r["weight"], 2)
-
-    # ── Styles ──────────────────────────────────────────────────────────────
-    def thin_border():
-        s = Side(style="thin", color="BFBFBF")
-        return Border(left=s, right=s, top=s, bottom=s)
-
-    def hdr_font(bold=True, size=10, color="FFFFFF"):
-        return Font(name="Calibri", bold=bold, size=size, color=color)
-
-    def cell_font(bold=False, size=10, color="000000"):
-        return Font(name="Calibri", bold=bold, size=size, color=color)
-
-    def fill(hex_color):
-        return PatternFill("solid", fgColor=hex_color)
-
-    CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    LEFT   = Alignment(horizontal="left",   vertical="center", wrap_text=True)
-    RIGHT  = Alignment(horizontal="right",  vertical="center")
-
-    HDR_FILL   = fill("1E3A5F")   # dark navy
-    SUB_FILL   = fill("2D6A9F")   # mid blue
-    ALT1_FILL  = fill("EBF4FB")   # light blue stripe
-    ALT2_FILL  = fill("FFFFFF")
-    FOOT_FILL  = fill("1E3A5F")
-    DAY_FILL   = fill("154360")   # day-matrix header
-    ZERO_COLOR = "BFBFBF"
+    all_items = sorted(
+        CycleTubeItem.objects.filter(is_active=True),
+        key=lambda x: sku_sort_key(x.sku, x.size)
+    )
 
     wb = openpyxl.Workbook()
+    wb.remove(wb.active)
 
-    # ════════════════════════════════════════════════════════════════════════
-    # SHEET 1 — Date-Wise Production Ledger
-    # ════════════════════════════════════════════════════════════════════════
-    ws1 = wb.active
-    ws1.title = "Date-Wise Production"
-    ws1.sheet_view.showGridLines = False
+    # ════════════════════════════════════════════════════════════════════════════════
+    # SHEET 1: Daily Matrix (1-31)
+    # ════════════════════════════════════════════════════════════════════════════════
+    ws1 = wb.create_sheet("Daily Matrix (1-31)")
+    ws1.views.sheetView[0].showGridLines = True
 
-    # Title
-    ws1.merge_cells("A1:H1")
-    t = ws1["A1"]
-    t.value = f"CYCLE TUBE — DATE-WISE PRODUCTION  |  {label}"
-    t.font = Font(name="Calibri", bold=True, size=14, color="FFFFFF")
-    t.fill = HDR_FILL
-    t.alignment = CENTER
-    ws1.row_dimensions[1].height = 30
+    tot_start_col = 7 + num_days
+    last_col = tot_start_col + 2  # Total Pcs, Wt, Total Kgs
 
-    # Sub-title row
-    ws1.merge_cells("A2:H2")
-    s2 = ws1["A2"]
-    s2.value = "Radhu Rubber Industries"
-    s2.font = Font(name="Calibri", bold=False, size=10, color="FFFFFF")
-    s2.fill = SUB_FILL
-    s2.alignment = CENTER
+    # Title Banner
+    ws1.merge_cells(start_row=1, start_column=1, end_row=1, end_column=last_col)
+    c1 = ws1.cell(1, 1, "RADHU INDUSTRIES")
+    c1.font = f_title; c1.fill = fill_hdr; c1.alignment = al_center
+    ws1.row_dimensions[1].height = 28
+
+    ws1.merge_cells(start_row=2, start_column=1, end_row=2, end_column=last_col)
+    c2 = ws1.cell(2, 1, "17/5 MILE STONE DELHI MEERUT ROAD MURAD NAGAR U.P.-201206")
+    c2.font = f_sub; c2.fill = fill_sub; c2.alignment = al_center
     ws1.row_dimensions[2].height = 18
 
-    # Column headers
-    col_hdrs = ["S.No", "Tube Name", "Size", "Type", "Brand", "Total Production", "Weight (Kg)", "Total Kgs"]
+    ws1.merge_cells(start_row=3, start_column=1, end_row=3, end_column=last_col)
+    c3 = ws1.cell(3, 1, f"CYCLE TUBE — DATE-WISE PRODUCTION MATRIX | {label}")
+    c3.font = f_heading; c3.fill = fill_hdr; c3.alignment = al_center
     ws1.row_dimensions[3].height = 22
-    for ci, h in enumerate(col_hdrs, 1):
-        c = ws1.cell(row=3, column=ci, value=h)
-        c.font = hdr_font()
-        c.fill = HDR_FILL
-        c.alignment = CENTER
-        c.border = thin_border()
 
-    col_widths1 = [6, 30, 12, 12, 18, 18, 12, 12]
-    for ci, w in enumerate(col_widths1, 1):
-        ws1.column_dimensions[get_column_letter(ci)].width = w
+    # Row 4: Dates Header
+    ws1.merge_cells("A4:F4")
+    ws1.cell(4, 1, "ITEM DETAILS").font = f_tbl_hdr
+    ws1.cell(4, 1).fill = fill_hdr; ws1.cell(4, 1).alignment = al_center
 
-    grand_total = 0
-    grand_kgs   = 0.0
-    for ri, row in enumerate(rows):
-        excel_row = ri + 4
-        row_fill = ALT1_FILL if ri % 2 == 0 else fill("FFFFFF")
-        vals = [
-            row["sno"],
-            row["tube_name"],
-            row["size"],
-            row["type"],
-            row["brand"],
-            row["total"],
-            row["weight"],
-            row["total_kgs"],
-        ]
-        aligns = [CENTER, LEFT, CENTER, CENTER, CENTER, CENTER, CENTER, CENTER]
-        for ci, (v, al) in enumerate(zip(vals, aligns), 1):
-            c = ws1.cell(row=excel_row, column=ci, value=v)
-            c.font = cell_font(bold=(ci == 6))
-            c.fill = row_fill
-            c.alignment = al
-            c.border = thin_border()
-            if ci == 6:
-                c.font = Font(name="Calibri", bold=True, size=10, color="1A5276")
-        grand_total += row["total"]
-        grand_kgs   += row["total_kgs"]
+    for d in range(1, num_days + 1):
+        col = 6 + d
+        dt_cell = ws1.cell(4, col, f"{d:02d}-{month_name[:3]}")
+        dt_cell.font = f_tbl_hdr; dt_cell.fill = fill_day; dt_cell.alignment = al_center
 
-    # Footer
-    foot_row = len(rows) + 4
-    ws1.row_dimensions[foot_row].height = 20
-    for ci in range(1, 9):
-        c = ws1.cell(row=foot_row, column=ci)
-        c.fill = FOOT_FILL
-        c.border = thin_border()
-    ws1.cell(row=foot_row, column=1, value="TOTAL").font = hdr_font()
-    ws1.cell(row=foot_row, column=1).alignment = CENTER
-    ws1.cell(row=foot_row, column=6, value=grand_total).font = hdr_font()
-    ws1.cell(row=foot_row, column=6).alignment = CENTER
-    ws1.cell(row=foot_row, column=8, value=round(grand_kgs, 2)).font = hdr_font()
-    ws1.cell(row=foot_row, column=8).alignment = CENTER
+    ws1.merge_cells(start_row=4, start_column=tot_start_col, end_row=4, end_column=last_col)
+    tot_banner = ws1.cell(4, tot_start_col, "MONTHLY TOTALS")
+    tot_banner.font = f_tbl_hdr; tot_banner.fill = fill_hdr; tot_banner.alignment = al_center
 
-    # ════════════════════════════════════════════════════════════════════════
-    # SHEET 2 — Monthly Summary (same as sheet 1 but with per-item weight kg totals)
-    # ════════════════════════════════════════════════════════════════════════
+    # Row 5: Column Sub-headers
+    ws1.row_dimensions[5].height = 20
+    fixed_hdrs = ["#", "CODE", "TUBE ITEM", "SIZE", "TYPE", "BRAND"]
+    for ci, h in enumerate(fixed_hdrs, 1):
+        c = ws1.cell(5, ci, h)
+        c.font = f_tbl_hdr; c.fill = fill_hdr; c.alignment = al_center; c.border = border_cell
+
+    for d in range(1, num_days + 1):
+        col = 6 + d
+        c = ws1.cell(5, col, f"D{d}")
+        c.font = Font(name="Calibri", size=8, bold=True, color="FFFFFF")
+        c.fill = fill_sub; c.alignment = al_center; c.border = border_cell
+
+    for idx, h_tot in enumerate(["TOTAL PCS", "WT/PC (KG)", "TOTAL KGS"]):
+        col = tot_start_col + idx
+        c = ws1.cell(5, col, h_tot)
+        c.font = f_tbl_hdr; c.fill = fill_hdr; c.alignment = al_center; c.border = border_cell
+
+    # Fill Rows
+    r_idx = 6
+    for idx, item in enumerate(all_items, 1):
+        rf = fill_zebra if idx % 2 == 0 else PatternFill("solid", fgColor="FFFFFF")
+        ws1.row_dimensions[r_idx].height = 18
+
+        ws1.cell(r_idx, 1, idx).alignment = al_center
+        ws1.cell(r_idx, 2, item.sku or "").alignment = al_center
+        ws1.cell(r_idx, 3, f"{item.size or ''} {item.type or ''} {item.brand or ''}".strip()).alignment = al_left
+        ws1.cell(r_idx, 4, item.size or "").alignment = al_center
+        ws1.cell(r_idx, 5, item.type or "").alignment = al_center
+        ws1.cell(r_idx, 6, item.brand or "").alignment = al_left
+
+        for c in range(1, 7):
+            cell = ws1.cell(r_idx, c)
+            cell.font = f_bold if c == 2 else f_data
+            cell.fill = rf; cell.border = border_cell
+
+        for d in range(1, num_days + 1):
+            col = 6 + d
+            val = prod_data.get((item.id, d), 0)
+            cell_q = ws1.cell(r_idx, col, val if val > 0 else None)
+            cell_q.alignment = al_right
+            cell_q.border = border_cell
+            cell_q.fill = rf
+            if val > 0:
+                cell_q.font = Font(name="Calibri", size=9, bold=True, color="1D4ED8")
+
+        # Total formulas for Row
+        day_cols = [f"{get_column_letter(6 + d)}{r_idx}" for d in range(1, num_days + 1)]
+        tot_pcs = ws1.cell(r_idx, tot_start_col, f"={'+'.join(day_cols)}")
+        tot_pcs.font = f_bold; tot_pcs.alignment = al_right; tot_pcs.border = border_cell; tot_pcs.fill = fill_zebra
+
+        w_val = float(item.weight or 0.950)
+        c_wt = ws1.cell(r_idx, tot_start_col + 1, w_val)
+        c_wt.font = f_data; c_wt.alignment = al_right; c_wt.border = border_cell; c_wt.fill = fill_zebra
+
+        col_pcs_let = get_column_letter(tot_start_col)
+        col_wt_let = get_column_letter(tot_start_col + 1)
+        tot_kgs = ws1.cell(r_idx, tot_start_col + 2, f"={col_pcs_let}{r_idx}*{col_wt_let}{r_idx}")
+        tot_kgs.font = f_bold; tot_kgs.alignment = al_right; tot_kgs.border = border_cell; tot_kgs.fill = fill_zebra
+
+        r_idx += 1
+
+    # Footer Total Row
+    foot_row = r_idx
+    ws1.row_dimensions[foot_row].height = 22
+    ws1.merge_cells(f"A{foot_row}:F{foot_row}")
+    f_lbl = ws1.cell(foot_row, 1, "TOTAL PRODUCTION")
+    f_lbl.font = f_tot; f_lbl.alignment = al_center; f_lbl.fill = fill_tot
+
+    for col in range(1, last_col + 1):
+        c = ws1.cell(foot_row, col)
+        c.border = border_tot
+        c.fill = fill_tot
+
+    for col in range(7, tot_start_col + 1):
+        col_let = get_column_letter(col)
+        c = ws1.cell(foot_row, col, f"=SUM({col_let}6:{col_let}{foot_row - 1})")
+        c.font = f_tot; c.alignment = al_right
+
+    # Total kgs in footer
+    col_kgs_let = get_column_letter(last_col)
+    c_tot_kg = ws1.cell(foot_row, last_col, f"=SUM({col_kgs_let}6:{col_kgs_let}{foot_row - 1})")
+    c_tot_kg.font = f_tot; c_tot_kg.alignment = al_right
+
+    ws1.column_dimensions["A"].width = 5
+    ws1.column_dimensions["B"].width = 9   # CODE column
+    ws1.column_dimensions["C"].width = 24
+    ws1.column_dimensions["D"].width = 12
+    ws1.column_dimensions["E"].width = 12
+    ws1.column_dimensions["F"].width = 15
+
+    for d in range(1, num_days + 1):
+        ws1.column_dimensions[get_column_letter(6 + d)].width = 6
+
+    ws1.column_dimensions[get_column_letter(tot_start_col)].width = 12
+    ws1.column_dimensions[get_column_letter(tot_start_col + 1)].width = 11
+    ws1.column_dimensions[get_column_letter(tot_start_col + 2)].width = 13
+
+    # ════════════════════════════════════════════════════════════════════════════════
+    # SHEET 2: Monthly Summary
+    # ════════════════════════════════════════════════════════════════════════════════
     ws2 = wb.create_sheet("Monthly Summary")
-    ws2.sheet_view.showGridLines = False
+    ws2.views.sheetView[0].showGridLines = True
 
-    ws2.merge_cells("A1:H1")
-    t2 = ws2["A1"]
-    t2.value = f"CYCLE TUBE — MONTHLY SUMMARY  |  {label}"
-    t2.font = Font(name="Calibri", bold=True, size=14, color="FFFFFF")
-    t2.fill = HDR_FILL
-    t2.alignment = CENTER
-    ws2.row_dimensions[1].height = 30
+    ws2.merge_cells("A1:I1")
+    c1 = ws2.cell(1, 1, "RADHU INDUSTRIES")
+    c1.font = f_title; c1.fill = fill_hdr; c1.alignment = al_center
+    ws2.row_dimensions[1].height = 28
 
-    ws2.merge_cells("A2:H2")
-    s22 = ws2["A2"]
-    s22.value = "Radhu Rubber Industries"
-    s22.font = Font(name="Calibri", bold=False, size=10, color="FFFFFF")
-    s22.fill = SUB_FILL
-    s22.alignment = CENTER
+    ws2.merge_cells("A2:I2")
+    c2 = ws2.cell(2, 1, "17/5 MILE STONE DELHI MEERUT ROAD MURAD NAGAR U.P.-201206")
+    c2.font = f_sub; c2.fill = fill_sub; c2.alignment = al_center
     ws2.row_dimensions[2].height = 18
 
-    sum_hdrs = ["S.No", "Tube Name", "Size", "Type", "Brand", "Month Total", "Wt/Pc (Kg)", "Total Kgs"]
+    ws2.merge_cells("A3:I3")
+    c3 = ws2.cell(3, 1, f"CYCLE TUBE — MONTHLY PRODUCTION SUMMARY | {label}")
+    c3.font = f_heading; c3.fill = fill_hdr; c3.alignment = al_center
     ws2.row_dimensions[3].height = 22
-    for ci, h in enumerate(sum_hdrs, 1):
-        c = ws2.cell(row=3, column=ci, value=h)
-        c.font = hdr_font()
-        c.fill = HDR_FILL
-        c.alignment = CENTER
-        c.border = thin_border()
 
-    for ci, w in enumerate([6, 30, 12, 12, 18, 14, 12, 12], 1):
+    sum_hdrs = ["#", "CODE", "TUBE ITEM", "SIZE", "TYPE", "BRAND", "MONTH TOTAL (PCS)", "WT/PC (KG)", "TOTAL KGS"]
+    ws2.row_dimensions[5].height = 22
+    for ci, h in enumerate(sum_hdrs, 1):
+        c = ws2.cell(5, ci, h)
+        c.font = f_tbl_hdr; c.fill = fill_hdr; c.alignment = al_center; c.border = border_cell
+
+    r2_idx = 6
+    for idx, item in enumerate(all_items, 1):
+        rf = fill_zebra if idx % 2 == 0 else PatternFill("solid", fgColor="FFFFFF")
+        ws2.row_dimensions[r2_idx].height = 18
+
+        tot_q = sum(prod_data.get((item.id, d), 0) for d in range(1, num_days + 1))
+        w_val = float(item.weight or 0.950)
+
+        vals2 = [
+            idx,
+            item.sku or "",
+            f"{item.size or ''} {item.type or ''} {item.brand or ''}".strip(),
+            item.size or "",
+            item.type or "",
+            item.brand or "",
+            tot_q if tot_q > 0 else None,
+            w_val,
+            f"=G{r2_idx}*H{r2_idx}"
+        ]
+
+        for ci, v in enumerate(vals2, 1):
+            c = ws2.cell(r2_idx, ci, v)
+            c.border = border_cell
+            c.fill = rf
+            c.font = f_bold if ci in [2, 7, 9] else f_data
+            c.alignment = al_center if ci in [1, 2, 4, 5] else (al_left if ci in [3, 6] else al_right)
+
+        r2_idx += 1
+
+    ws2.merge_cells(f"A{r2_idx}:F{r2_idx}")
+    t2_lbl = ws2.cell(r2_idx, 1, "TOTALS")
+    t2_lbl.font = f_tot; t2_lbl.alignment = al_center; t2_lbl.fill = fill_tot
+
+    for col in range(1, 10):
+        c = ws2.cell(r2_idx, col)
+        c.border = border_tot
+        c.fill = fill_tot
+
+    ws2.cell(r2_idx, 7, f"=SUM(G6:G{r2_idx - 1})").font = f_tot
+    ws2.cell(r2_idx, 7).alignment = al_right
+
+    ws2.cell(r2_idx, 9, f"=SUM(I6:I{r2_idx - 1})").font = f_tot
+    ws2.cell(r2_idx, 9).alignment = al_right
+
+    col_w2 = [5, 9, 24, 12, 12, 16, 16, 12, 14]
+    for ci, w in enumerate(col_w2, 1):
         ws2.column_dimensions[get_column_letter(ci)].width = w
 
-    g2_total = 0; g2_kgs = 0.0
-    for ri, row in enumerate(rows):
-        er = ri + 4
-        rf = ALT1_FILL if ri % 2 == 0 else fill("FFFFFF")
-        vs = [row["sno"], row["tube_name"], row["size"], row["type"], row["brand"],
-              row["total"], row["weight"], row["total_kgs"]]
-        als = [CENTER, LEFT, CENTER, CENTER, CENTER, CENTER, CENTER, CENTER]
-        for ci, (v, al) in enumerate(zip(vs, als), 1):
-            c = ws2.cell(row=er, column=ci, value=v)
-            c.font = cell_font(bold=(ci == 6))
-            c.fill = rf; c.alignment = al; c.border = thin_border()
-        g2_total += row["total"]; g2_kgs += row["total_kgs"]
+    # ════════════════════════════════════════════════════════════════════════════════
+    # SHEET 3: Date-Wise Production (Detailed Ledger)
+    # ════════════════════════════════════════════════════════════════════════════════
+    ws3 = wb.create_sheet("Date-Wise Production")
+    ws3.views.sheetView[0].showGridLines = True
 
-    fr2 = len(rows) + 4
-    for ci in range(1, 9):
-        c = ws2.cell(row=fr2, column=ci)
-        c.fill = FOOT_FILL; c.border = thin_border()
-    ws2.cell(row=fr2, column=1, value="TOTAL").font = hdr_font()
-    ws2.cell(row=fr2, column=1).alignment = CENTER
-    ws2.cell(row=fr2, column=6, value=g2_total).font = hdr_font()
-    ws2.cell(row=fr2, column=6).alignment = CENTER
-    ws2.cell(row=fr2, column=8, value=round(g2_kgs, 2)).font = hdr_font()
-    ws2.cell(row=fr2, column=8).alignment = CENTER
+    ws3.merge_cells("A1:J1")
+    c1 = ws3.cell(1, 1, "RADHU INDUSTRIES")
+    c1.font = f_title; c1.fill = fill_hdr; c1.alignment = al_center
+    ws3.row_dimensions[1].height = 28
 
-    # ════════════════════════════════════════════════════════════════════════
-    # SHEET 3 — Daily Matrix (1-31)
-    # ════════════════════════════════════════════════════════════════════════
-    ws3 = wb.create_sheet("Daily Matrix (1-31)")
-    ws3.sheet_view.showGridLines = False
-
-    total_cols = 5 + days_in_month + 2   # sno+name+size+type+brand + days + total+kgs
-
-    # Title
-    ws3.merge_cells(start_row=1, start_column=1, end_row=1, end_column=total_cols)
-    t3 = ws3.cell(row=1, column=1, value=f"CYCLE TUBE — DAILY MATRIX  |  {label}")
-    t3.font = Font(name="Calibri", bold=True, size=14, color="FFFFFF")
-    t3.fill = HDR_FILL; t3.alignment = CENTER
-    ws3.row_dimensions[1].height = 30
-
-    ws3.merge_cells(start_row=2, start_column=1, end_row=2, end_column=total_cols)
-    s32 = ws3.cell(row=2, column=1, value="Radhu Rubber Industries")
-    s32.font = Font(name="Calibri", bold=False, size=10, color="FFFFFF")
-    s32.fill = SUB_FILL; s32.alignment = CENTER
+    ws3.merge_cells("A2:J2")
+    c2 = ws3.cell(2, 1, "17/5 MILE STONE DELHI MEERUT ROAD MURAD NAGAR U.P.-201206")
+    c2.font = f_sub; c2.fill = fill_sub; c2.alignment = al_center
     ws3.row_dimensions[2].height = 18
 
-    # Header row
+    ws3.merge_cells("A3:J3")
+    c3 = ws3.cell(3, 1, f"CYCLE TUBE — DAILY PRODUCTION LOG | {label}")
+    c3.font = f_heading; c3.fill = fill_hdr; c3.alignment = al_center
     ws3.row_dimensions[3].height = 22
-    fixed_hdrs = ["S.No", "Tube Name", "Size", "Type", "Brand"]
-    for ci, h in enumerate(fixed_hdrs, 1):
-        c = ws3.cell(row=3, column=ci, value=h)
-        c.font = hdr_font(); c.fill = HDR_FILL; c.alignment = CENTER; c.border = thin_border()
 
-    # Day columns
-    for d in range(1, days_in_month + 1):
-        ci = d + 5
-        c = ws3.cell(row=3, column=ci, value=d)
-        c.font = hdr_font(size=9); c.fill = fill("154360"); c.alignment = CENTER; c.border = thin_border()
+    led_hdrs = ["Date", "CODE", "Tube Item", "Size", "Type", "Brand", "Quality", "Quantity", "Weight (Kg)", "Total Kgs"]
+    ws3.row_dimensions[5].height = 22
+    for ci, h in enumerate(led_hdrs, 1):
+        c = ws3.cell(5, ci, h)
+        c.font = f_tbl_hdr; c.fill = fill_hdr; c.alignment = al_center; c.border = border_cell
 
-    for ci, h in enumerate(["TOTAL", "Total Kgs"], 1):
-        col = 5 + days_in_month + ci
-        c = ws3.cell(row=3, column=col, value=h)
-        c.font = hdr_font(); c.fill = HDR_FILL; c.alignment = CENTER; c.border = thin_border()
+    sorted_entries = sorted(entries, key=lambda e: (e.date, sku_sort_key(e.tube_item.sku if e.tube_item else "", e.tube_item.size if e.tube_item else "")))
+    r3_idx = 6
+    for idx, e in enumerate(sorted_entries, 1):
+        rf = fill_zebra if idx % 2 == 0 else PatternFill("solid", fgColor="FFFFFF")
+        item = e.tube_item
+        w_val = float(item.weight or 0.950) if item else 0.950
+        qty = e.quantity or 0
 
-    # Column widths
-    ws3.column_dimensions["A"].width = 5
-    ws3.column_dimensions["B"].width = 28
-    for col_letter in ["C", "D", "E"]:
-        ws3.column_dimensions[col_letter].width = 11
-    for d in range(1, days_in_month + 1):
-        ws3.column_dimensions[get_column_letter(d + 5)].width = 6
-    ws3.column_dimensions[get_column_letter(5 + days_in_month + 1)].width = 8
-    ws3.column_dimensions[get_column_letter(5 + days_in_month + 2)].width = 10
+        vals3 = [
+            e.date.strftime("%d-%m-%Y"),
+            item.sku if item else "",
+            f"{item.size or ''} {item.type or ''} {item.brand or ''}".strip() if item else "",
+            item.size if item else "",
+            item.type if item else "",
+            item.brand if item else "",
+            e.tube_quality or "normal",
+            qty,
+            w_val,
+            f"=H{r3_idx}*I{r3_idx}",
+        ]
 
-    # Day column totals accumulator
-    day_col_totals = {d: 0 for d in range(1, days_in_month + 1)}
-    grand_tot3 = 0; grand_kgs3 = 0.0
-
-    for ri, row in enumerate(rows):
-        er = ri + 4
-        rf = ALT1_FILL if ri % 2 == 0 else fill("FFFFFF")
-
-        fixed_vals = [row["sno"], row["tube_name"], row["size"], row["type"], row["brand"]]
-        fixed_als  = [CENTER, LEFT, CENTER, CENTER, CENTER]
-        for ci, (v, al) in enumerate(zip(fixed_vals, fixed_als), 1):
-            c = ws3.cell(row=er, column=ci, value=v)
-            c.font = cell_font(); c.fill = rf; c.alignment = al; c.border = thin_border()
-
-        row_total = 0
-        for d in range(1, days_in_month + 1):
-            qty = row["days"].get(d, 0)
-            ci = d + 5
-            c = ws3.cell(row=er, column=ci, value=qty if qty > 0 else None)
+        for ci, v in enumerate(vals3, 1):
+            c = ws3.cell(r3_idx, ci, v)
+            c.border = border_cell
             c.fill = rf
-            c.alignment = CENTER
-            c.border = thin_border()
-            if qty > 0:
-                c.font = cell_font(bold=True, color="154360")
-            else:
-                c.font = Font(name="Calibri", size=9, color=ZERO_COLOR)
-                c.value = "-"
-            row_total += qty
-            day_col_totals[d] += qty
+            c.font = f_bold if ci in [2, 8, 10] else f_data
+            c.alignment = al_center if ci in [1, 2, 4, 5, 7] else (al_left if ci in [3, 6] else al_right)
 
-        # Row total & kgs
-        row_kgs = round(row_total * row["weight"], 2)
-        tot_ci = 5 + days_in_month + 1
-        c = ws3.cell(row=er, column=tot_ci, value=row_total)
-        c.font = Font(name="Calibri", bold=True, size=10, color="1A5276")
-        c.fill = ALT1_FILL; c.alignment = CENTER; c.border = thin_border()
+        r3_idx += 1
 
-        kgs_ci = 5 + days_in_month + 2
-        c = ws3.cell(row=er, column=kgs_ci, value=row_kgs)
-        c.font = cell_font(bold=True); c.fill = rf; c.alignment = CENTER; c.border = thin_border()
+    if sorted_entries:
+        ws3.merge_cells(f"A{r3_idx}:G{r3_idx}")
+        t3_lbl = ws3.cell(r3_idx, 1, "TOTAL")
+        t3_lbl.font = f_tot; t3_lbl.alignment = al_center; t3_lbl.fill = fill_tot
+        for col in range(1, 11):
+            ws3.cell(r3_idx, col).border = border_tot
+            ws3.cell(r3_idx, col).fill = fill_tot
+        ws3.cell(r3_idx, 8, f"=SUM(H6:H{r3_idx - 1})").font = f_tot
+        ws3.cell(r3_idx, 8).alignment = al_right
+        ws3.cell(r3_idx, 10, f"=SUM(J6:J{r3_idx - 1})").font = f_tot
+        ws3.cell(r3_idx, 10).alignment = al_right
 
-        grand_tot3 += row_total; grand_kgs3 += row_kgs
+    col_w3 = [12, 9, 24, 12, 12, 16, 12, 12, 12, 14]
+    for ci, w in enumerate(col_w3, 1):
+        ws3.column_dimensions[get_column_letter(ci)].width = w
 
-    # Footer row
-    fr3 = len(rows) + 4
-    ws3.row_dimensions[fr3].height = 20
-    for ci in range(1, total_cols + 1):
-        c = ws3.cell(row=fr3, column=ci)
-        c.fill = FOOT_FILL; c.border = thin_border()
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
 
-    ws3.cell(row=fr3, column=1, value="TOTAL").font = hdr_font()
-    ws3.cell(row=fr3, column=1).alignment = CENTER
-
-    for d in range(1, days_in_month + 1):
-        ci = d + 5
-        v = day_col_totals[d]
-        c = ws3.cell(row=fr3, column=ci, value=v if v > 0 else None)
-        c.font = hdr_font(size=9); c.alignment = CENTER; c.border = thin_border()
-
-    c = ws3.cell(row=fr3, column=5 + days_in_month + 1, value=grand_tot3)
-    c.font = hdr_font(); c.alignment = CENTER
-
-    c = ws3.cell(row=fr3, column=5 + days_in_month + 2, value=round(grand_kgs3, 2))
-    c.font = hdr_font(); c.alignment = CENTER
-
-    # ── Freeze panes ────────────────────────────────────────────────────────
-    ws1.freeze_panes = "A4"
-    ws2.freeze_panes = "A4"
-    ws3.freeze_panes = "F4"
-
-    # ── Output ──────────────────────────────────────────────────────────────
-    buf = BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-
-    filename_label = label.replace(" ", "_")
+    filename = f"CYCLE_TUBE_PRODUCTION_{year}_{month:02d}.xlsx"
     response = HttpResponse(
-        buf.read(),
-        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        output.getvalue(),
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-    response["Content-Disposition"] = f'attachment; filename="CYCLE_TUBE_PRODUCTION_{filename_label}.xlsx"'
+    response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    response["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response["Pragma"] = "no-cache"
+    response["Expires"] = "0"
     return response
 
 

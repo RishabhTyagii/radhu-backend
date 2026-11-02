@@ -1,3 +1,4 @@
+import re
 import datetime
 from decimal import Decimal
 from django.db import transaction
@@ -1083,6 +1084,7 @@ def daily_summary(request):
             "parchi_kg": str(parchi_kg),
             "difference": str(round(difference, 2)),
             "theoretical_total_compound": str(round(theoretical_total_compound, 2)),
+            "theoretical_compound": str(round(theoretical_total_compound, 2)),
             "mixing_actual_compound": str(mixing_actual),
             "variance": str(round(variance, 2)),
             "chakka": str(chakka),
@@ -1113,6 +1115,7 @@ def daily_summary(request):
             "parchi_kg": str(round(tot_parchi_kg, 2)),
             "difference": str(round(tot_diff, 2)),
             "theoretical_total_compound": str(round(tot_theo_comp, 2)),
+            "theoretical_compound": str(round(tot_theo_comp, 2)),
             "mixing_actual_compound": str(round(tot_mixing_act, 2)),
             "variance": str(round(tot_var, 2)),
             "chakka": str(round(tot_chakka, 2)),
@@ -1323,6 +1326,26 @@ def import_production_excel(request):
     })
 
 
+def sku_sort_key(sku, fallback=""):
+    """
+    Sorts codes alphanumerically like CT1..CT60, CTRFM1, CTRS1, etc.
+    Items without code go to the end, ordered alphabetically by fallback.
+    """
+    if not sku:
+        return (1, 9999, str(fallback or "").upper())
+    sku_str = str(sku).strip().upper()
+    m = re.match(r"^([A-Z]+)(\d+)(.*)$", sku_str)
+    if m:
+        prefix, num, suffix = m.groups()
+        order = 0
+        if any(x in prefix for x in ["RJ", "RS", "RFM"]):
+            order = 2
+        return (order, prefix, int(num), suffix)
+    if sku_str.isdigit():
+        return (0, "", int(sku_str), "")
+    return (0, sku_str, 0, "")
+
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def production_sheet(request):
@@ -1349,7 +1372,6 @@ def production_sheet(request):
             entry_type="production", date__year=year, date__month=month
         ).exclude(bucket="rfm_stock").exclude(tyre_item__size__iexact="RFM").exclude(tyre_item__brand__icontains="Return From Market").select_related("tyre_item")
     else:
-        # Default to current month instead of showing ALL entries
         entries = CycleTyreEntry.objects.filter(
             entry_type="production", date__year=today.year, date__month=today.month
         ).exclude(bucket="rfm_stock").exclude(tyre_item__size__iexact="RFM").exclude(tyre_item__brand__icontains="Return From Market").select_related("tyre_item")
@@ -1362,6 +1384,7 @@ def production_sheet(request):
         if tid not in item_map:
             item_map[tid] = {
                 "id": tid,
+                "sku": e.tyre_item.sku or "",
                 "tyre_name": f"{e.tyre_item.size} {e.tyre_item.box_type} {e.tyre_item.material} {e.tyre_item.brand}".strip(),
                 "size": e.tyre_item.size,
                 "box_type": e.tyre_item.box_type,
@@ -1397,7 +1420,7 @@ def production_sheet(request):
         tot_rejected += rejected_qty
 
     rows = list(item_map.values())
-    rows.sort(key=lambda x: (x["size"], x["box_type"], x["material"], x["brand"]))
+    rows.sort(key=lambda x: sku_sort_key(x.get("sku", ""), x.get("tyre_name", "")))
 
     return Response({
         "data": rows,
@@ -1417,21 +1440,32 @@ def production_sheet(request):
 @permission_classes([IsAuthenticated])
 def export_production_sheet(request):
     """
-    Export monthly date-wise item production in the exact format of
-    DATE WISE PRODUCTION.xlsx (template based).
+    Export Cycle Tyre production sheet as styled Excel workbook (3 sheets):
+      1. Daily Matrix (1-31) - Calendar grid with A (1st), B (2nd), C (Rej)
+      2. Monthly Summary - Item consolidated totals with weights
+      3. Date-Wise Production - Detailed daily entry ledger
+    Sorted strictly by coding (SKU).
     """
     import calendar
     from io import BytesIO
     import openpyxl
+    from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
     from openpyxl.utils import get_column_letter
     from django.http import HttpResponse
-    from django.conf import settings
-    import os
 
     today = datetime.date.today()
+    date_param = request.query_params.get("date", "").strip()
     month_param = request.query_params.get("month", "").strip()
 
-    if month_param and month_param != "all":
+    is_single_date = False
+    if date_param:
+        try:
+            parts = date_param.split("-")
+            year, month = int(parts[0]), int(parts[1])
+            is_single_date = True
+        except (ValueError, IndexError):
+            year, month = today.year, today.month
+    elif month_param and month_param != "all":
         try:
             parts = month_param.split("-")
             year, month = int(parts[0]), int(parts[1])
@@ -1440,38 +1474,42 @@ def export_production_sheet(request):
     else:
         year, month = today.year, today.month
 
-    # Template file path
-    base_dir = getattr(settings, 'BASE_DIR', None)
-    template_path = os.path.join(base_dir, 'templates', 'excel', 'DATE_WISE_PRODUCTION.xlsx') if base_dir else None
-
-    if not template_path or not os.path.exists(template_path):
-        # Fallback to local Desktop or EC2 fixed path
-        for candidate in [
-            '/var/www/radhu-backend/templates/excel/DATE_WISE_PRODUCTION.xlsx',
-            r'C:\Users\risha\Desktop\DATE WISE PRODUCTION.xlsx',
-        ]:
-            if os.path.exists(candidate):
-                template_path = candidate
-                break
-
-    if not template_path or not os.path.exists(template_path):
-        return Response({"error": "Template file DATE_WISE_PRODUCTION.xlsx not found on server"}, status=404)
-
-    wb = openpyxl.load_workbook(template_path)
-    ws = wb.active
-
     _, num_days = calendar.monthrange(year, month)
     month_name = calendar.month_name[month].upper()
+    label = f"{date_param}" if is_single_date else f"{month_name} {year}"
 
-    # Update Title (Row 1)
-    ws.cell(1, 8, f"PER DATE ITEM WISE PRODUCTION DATA OF CYCLE TYRE FOR THE MONTH OF {month_name} {year}")
+    # Typography & Styles
+    f_title = Font(name="Calibri", size=15, bold=True, color="FFFFFF")
+    f_sub = Font(name="Calibri", size=10, bold=False, color="FFFFFF")
+    f_heading = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+    f_tbl_hdr = Font(name="Calibri", size=9, bold=True, color="FFFFFF")
+    f_data = Font(name="Calibri", size=9)
+    f_bold = Font(name="Calibri", size=9, bold=True)
+    f_tot = Font(name="Calibri", size=10, bold=True, color="0F172A")
 
-    # Fetch production entries for this month
-    entries = CycleTyreEntry.objects.filter(
-        entry_type='production',
-        date__year=year,
-        date__month=month
-    ).exclude(bucket="rfm_stock").exclude(tyre_item__size__iexact="RFM").exclude(tyre_item__brand__icontains="Return From Market").select_related('tyre_item')
+    fill_hdr = PatternFill(start_color="1E3A8A", end_color="1E3A8A", fill_type="solid")
+    fill_sub = PatternFill(start_color="2D6A9F", end_color="2D6A9F", fill_type="solid")
+    fill_day = PatternFill(start_color="154360", end_color="154360", fill_type="solid")
+    fill_zebra = PatternFill(start_color="F8FAFC", end_color="F8FAFC", fill_type="solid")
+    fill_tot = PatternFill(start_color="E2E8F0", end_color="E2E8F0", fill_type="solid")
+
+    al_center = Alignment(horizontal="center", vertical="center")
+    al_left = Alignment(horizontal="left", vertical="center")
+    al_right = Alignment(horizontal="right", vertical="center")
+
+    thin = Side(border_style="thin", color="CBD5E1")
+    double = Side(border_style="double", color="1E3A8A")
+    border_cell = Border(left=thin, right=thin, top=thin, bottom=thin)
+    border_tot = Border(left=thin, right=thin, top=thin, bottom=double)
+
+    if is_single_date:
+        entries = list(CycleTyreEntry.objects.filter(
+            entry_type='production', date=date_param
+        ).exclude(bucket="rfm_stock").exclude(tyre_item__size__iexact="RFM").exclude(tyre_item__brand__icontains="Return From Market").select_related('tyre_item', 'user'))
+    else:
+        entries = list(CycleTyreEntry.objects.filter(
+            entry_type='production', date__year=year, date__month=month
+        ).exclude(bucket="rfm_stock").exclude(tyre_item__size__iexact="RFM").exclude(tyre_item__brand__icontains="Return From Market").select_related('tyre_item', 'user'))
 
     prod_data = {}
     for e in entries:
@@ -1483,53 +1521,322 @@ def export_production_sheet(request):
         prod_data[(tid, day)]['b'] += (e.second_grade or 0)
         prod_data[(tid, day)]['c'] += (e.rejected_grade or 0)
 
-    # 48 standard items matching rows 7 to 54 in the template
-    items = list(CycleTyreItem.objects.filter(is_active=True).exclude(size__in=['C-Grade', 'RFM']))
+    all_items = sorted(
+        CycleTyreItem.objects.filter(is_active=True),
+        key=lambda x: sku_sort_key(x.sku, x.size)
+    )
 
-    # Update dates in Row 5
-    for day in range(1, 31):
-        c = 5 + (day - 1) * 3
-        if day <= num_days:
-            ws.cell(5, c, datetime.datetime(year, month, day, 0, 0))
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
 
-    # Fill data for rows 7 to 54
-    for r in range(7, 55):
-        item_idx = r - 7
-        if item_idx < len(items):
-            item = items[item_idx]
-            for day in range(1, 31):
-                col_a = 5 + (day - 1) * 3
-                col_b = col_a + 1
-                col_c = col_a + 2
+    # SHEET 1: Daily Matrix (1-31)
+    ws1 = wb.create_sheet("Daily Matrix (1-31)")
+    ws1.views.sheetView[0].showGridLines = True
 
-                if day <= num_days:
-                    vals = prod_data.get((item.id, day), {'a': 0, 'b': 0, 'c': 0})
-                    if vals['a'] > 0:
-                        ws.cell(r, col_a, vals['a'])
-                    if vals['b'] > 0:
-                        ws.cell(r, col_b, vals['b'])
-                    if vals['c'] > 0:
-                        ws.cell(r, col_c, vals['c'])
+    tot_start_col = 6 + num_days * 3
+    last_col = tot_start_col + 3
 
-            # Set Item Row Sum Formulas for TOTAL (Cols 95, 96, 97)
-            a_cells = [f"{get_column_letter(5 + (d-1)*3)}{r}" for d in range(1, min(num_days, 30) + 1)]
-            b_cells = [f"{get_column_letter(6 + (d-1)*3)}{r}" for d in range(1, min(num_days, 30) + 1)]
-            c_cells = [f"{get_column_letter(7 + (d-1)*3)}{r}" for d in range(1, min(num_days, 30) + 1)]
+    # Title Banner
+    ws1.merge_cells(start_row=1, start_column=1, end_row=1, end_column=last_col)
+    c1 = ws1.cell(1, 1, "RADHU INDUSTRIES")
+    c1.font = f_title; c1.fill = fill_hdr; c1.alignment = al_center
+    ws1.row_dimensions[1].height = 28
 
-            ws.cell(r, 95, f"={'+'.join(a_cells)}")
-            ws.cell(r, 96, f"={'+'.join(b_cells)}")
-            ws.cell(r, 97, f"={'+'.join(c_cells)}")
+    ws1.merge_cells(start_row=2, start_column=1, end_row=2, end_column=last_col)
+    c2 = ws1.cell(2, 1, "17/5 MILE STONE DELHI MEERUT ROAD MURAD NAGAR U.P.-201206")
+    c2.font = f_sub; c2.fill = fill_sub; c2.alignment = al_center
+    ws1.row_dimensions[2].height = 18
+
+    ws1.merge_cells(start_row=3, start_column=1, end_row=3, end_column=last_col)
+    c3 = ws1.cell(3, 1, f"CYCLE TYRE — DATE-WISE PRODUCTION MATRIX | {label}")
+    c3.font = f_heading; c3.fill = fill_hdr; c3.alignment = al_center
+    ws1.row_dimensions[3].height = 22
+
+    # Row 4: Dates Header
+    ws1.merge_cells("A4:E4")
+    ws1.cell(4, 1, "ITEM DETAILS").font = f_tbl_hdr
+    ws1.cell(4, 1).fill = fill_hdr; ws1.cell(4, 1).alignment = al_center
+
+    for d in range(1, num_days + 1):
+        sc = 6 + (d - 1) * 3
+        ec = sc + 2
+        ws1.merge_cells(start_row=4, start_column=sc, end_row=4, end_column=ec)
+        dt_cell = ws1.cell(4, sc, f"{d:02d}-{month_name[:3]}")
+        dt_cell.font = f_tbl_hdr; dt_cell.fill = fill_day; dt_cell.alignment = al_center
+
+    ws1.merge_cells(start_row=4, start_column=tot_start_col, end_row=4, end_column=last_col)
+    tot_banner = ws1.cell(4, tot_start_col, "MONTHLY TOTALS")
+    tot_banner.font = f_tbl_hdr; tot_banner.fill = fill_hdr; tot_banner.alignment = al_center
+
+    # Row 5: Column Sub-headers
+    ws1.row_dimensions[5].height = 20
+    fixed_hdrs = ["#", "CODE", "SIZE", "PLY / TYPE", "BRAND"]
+    for ci, h in enumerate(fixed_hdrs, 1):
+        c = ws1.cell(5, ci, h)
+        c.font = f_tbl_hdr; c.fill = fill_hdr; c.alignment = al_center; c.border = border_cell
+
+    for d in range(1, num_days + 1):
+        sc = 6 + (d - 1) * 3
+        for sub_idx, sub_label in enumerate(["A", "B", "C"]):
+            col = sc + sub_idx
+            c = ws1.cell(5, col, sub_label)
+            c.font = Font(name="Calibri", size=8, bold=True, color="FFFFFF")
+            c.fill = fill_sub; c.alignment = al_center; c.border = border_cell
+
+    for idx, h_tot in enumerate(["A (1st)", "B (2nd)", "C (Rej)", "TOTAL"]):
+        col = tot_start_col + idx
+        c = ws1.cell(5, col, h_tot)
+        c.font = f_tbl_hdr; c.fill = fill_hdr; c.alignment = al_center; c.border = border_cell
+
+    r_idx = 6
+    for idx, item in enumerate(all_items, 1):
+        rf = fill_zebra if idx % 2 == 0 else PatternFill("solid", fgColor="FFFFFF")
+        ws1.row_dimensions[r_idx].height = 18
+
+        ws1.cell(r_idx, 1, idx).alignment = al_center
+        ws1.cell(r_idx, 2, item.sku or "").alignment = al_center
+        ws1.cell(r_idx, 3, item.size or "").alignment = al_left
+        ws1.cell(r_idx, 4, f"{item.material or ''} / {item.box_type or ''}".strip(" /")).alignment = al_center
+        ws1.cell(r_idx, 5, item.brand or "").alignment = al_left
+
+        for c in range(1, 6):
+            cell = ws1.cell(r_idx, c)
+            cell.font = f_bold if c == 2 else f_data
+            cell.fill = rf; cell.border = border_cell
+
+        for d in range(1, num_days + 1):
+            sc = 6 + (d - 1) * 3
+            vals = prod_data.get((item.id, d), {'a': 0, 'b': 0, 'c': 0})
+            ca = ws1.cell(r_idx, sc, vals['a'] if vals['a'] > 0 else None)
+            cb = ws1.cell(r_idx, sc + 1, vals['b'] if vals['b'] > 0 else None)
+            cc = ws1.cell(r_idx, sc + 2, vals['c'] if vals['c'] > 0 else None)
+
+            for col_obj, color_txt in [(ca, "1D4ED8"), (cb, "B45309"), (cc, "DC2626")]:
+                col_obj.alignment = al_right
+                col_obj.border = border_cell
+                col_obj.fill = rf
+                if col_obj.value:
+                    col_obj.font = Font(name="Calibri", size=9, bold=True, color=color_txt)
+
+        a_cols = [f"{get_column_letter(6 + (d-1)*3)}{r_idx}" for d in range(1, num_days + 1)]
+        b_cols = [f"{get_column_letter(7 + (d-1)*3)}{r_idx}" for d in range(1, num_days + 1)]
+        c_cols = [f"{get_column_letter(8 + (d-1)*3)}{r_idx}" for d in range(1, num_days + 1)]
+
+        tot_a = ws1.cell(r_idx, tot_start_col, f"={'+'.join(a_cols)}")
+        tot_b = ws1.cell(r_idx, tot_start_col + 1, f"={'+'.join(b_cols)}")
+        tot_c = ws1.cell(r_idx, tot_start_col + 2, f"={'+'.join(c_cols)}")
+
+        col_a_let = get_column_letter(tot_start_col)
+        col_b_let = get_column_letter(tot_start_col + 1)
+        col_c_let = get_column_letter(tot_start_col + 2)
+        tot_all = ws1.cell(r_idx, tot_start_col + 3, f"={col_a_let}{r_idx}+{col_b_let}{r_idx}+{col_c_let}{r_idx}")
+
+        for cell_tot in [tot_a, tot_b, tot_c, tot_all]:
+            cell_tot.font = f_bold
+            cell_tot.alignment = al_right
+            cell_tot.border = border_cell
+            cell_tot.fill = fill_zebra
+
+        r_idx += 1
+
+    foot_row = r_idx
+    ws1.row_dimensions[foot_row].height = 22
+    ws1.merge_cells(f"A{foot_row}:E{foot_row}")
+    f_lbl = ws1.cell(foot_row, 1, "TOTAL PRODUCTION")
+    f_lbl.font = f_tot; f_lbl.alignment = al_center; f_lbl.fill = fill_tot
+
+    for col in range(1, last_col + 1):
+        c = ws1.cell(foot_row, col)
+        c.border = border_tot
+        c.fill = fill_tot
+
+    for col in range(6, last_col + 1):
+        col_let = get_column_letter(col)
+        c = ws1.cell(foot_row, col, f"=SUM({col_let}6:{col_let}{foot_row - 1})")
+        c.font = f_tot; c.alignment = al_right
+
+    ws1.column_dimensions["A"].width = 5
+    ws1.column_dimensions["B"].width = 9
+    ws1.column_dimensions["C"].width = 13
+    ws1.column_dimensions["D"].width = 14
+    ws1.column_dimensions["E"].width = 15
+
+    for d in range(1, num_days + 1):
+        sc = 6 + (d - 1) * 3
+        ws1.column_dimensions[get_column_letter(sc)].width = 6
+        ws1.column_dimensions[get_column_letter(sc + 1)].width = 5
+        ws1.column_dimensions[get_column_letter(sc + 2)].width = 5
+
+    for ci in range(tot_start_col, last_col + 1):
+        ws1.column_dimensions[get_column_letter(ci)].width = 9
+
+    # SHEET 2: Monthly Summary
+    ws2 = wb.create_sheet("Monthly Summary")
+    ws2.views.sheetView[0].showGridLines = True
+
+    ws2.merge_cells("A1:L1")
+    c1 = ws2.cell(1, 1, "RADHU INDUSTRIES")
+    c1.font = f_title; c1.fill = fill_hdr; c1.alignment = al_center
+    ws2.row_dimensions[1].height = 28
+
+    ws2.merge_cells("A2:L2")
+    c2 = ws2.cell(2, 1, "17/5 MILE STONE DELHI MEERUT ROAD MURAD NAGAR U.P.-201206")
+    c2.font = f_sub; c2.fill = fill_sub; c2.alignment = al_center
+    ws2.row_dimensions[2].height = 18
+
+    ws2.merge_cells("A3:L3")
+    c3 = ws2.cell(3, 1, f"CYCLE TYRE — MONTHLY PRODUCTION SUMMARY | {label}")
+    c3.font = f_heading; c3.fill = fill_hdr; c3.alignment = al_center
+    ws2.row_dimensions[3].height = 22
+
+    sum_hdrs = ["#", "CODE", "SIZE", "PLY / BOX", "MATERIAL", "BRAND", "1ST GRADE (A)", "2ND GRADE (B)", "REJECTED (C)", "TOTAL CURING", "WEIGHT (KG)", "TOTAL KGS"]
+    ws2.row_dimensions[5].height = 22
+    for ci, h in enumerate(sum_hdrs, 1):
+        c = ws2.cell(5, ci, h)
+        c.font = f_tbl_hdr; c.fill = fill_hdr; c.alignment = al_center; c.border = border_cell
+
+    r2_idx = 6
+    for idx, item in enumerate(all_items, 1):
+        rf = fill_zebra if idx % 2 == 0 else PatternFill("solid", fgColor="FFFFFF")
+        ws2.row_dimensions[r2_idx].height = 18
+
+        tot_a = sum(prod_data.get((item.id, d), {'a': 0})['a'] for d in range(1, num_days + 1))
+        tot_b = sum(prod_data.get((item.id, d), {'b': 0})['b'] for d in range(1, num_days + 1))
+        tot_c = sum(prod_data.get((item.id, d), {'c': 0})['c'] for d in range(1, num_days + 1))
+        w_val = float(item.weight or 0.950)
+
+        vals2 = [
+            idx,
+            item.sku or "",
+            item.size or "",
+            item.box_type or "",
+            item.material or "",
+            item.brand or "",
+            tot_a if tot_a > 0 else None,
+            tot_b if tot_b > 0 else None,
+            tot_c if tot_c > 0 else None,
+            f"=G{r2_idx}+H{r2_idx}+I{r2_idx}",
+            w_val,
+            f"=J{r2_idx}*K{r2_idx}"
+        ]
+
+        for ci, v in enumerate(vals2, 1):
+            c = ws2.cell(r2_idx, ci, v)
+            c.border = border_cell
+            c.fill = rf
+            c.font = f_bold if ci in [2, 10, 12] else f_data
+            c.alignment = al_center if ci in [1, 2, 4, 5] else (al_left if ci in [3, 6] else al_right)
+
+        r2_idx += 1
+
+    ws2.merge_cells(f"A{r2_idx}:F{r2_idx}")
+    t2_lbl = ws2.cell(r2_idx, 1, "TOTALS")
+    t2_lbl.font = f_tot; t2_lbl.alignment = al_center; t2_lbl.fill = fill_tot
+
+    for col in range(1, 13):
+        c = ws2.cell(r2_idx, col)
+        c.border = border_tot
+        c.fill = fill_tot
+
+    for col in range(7, 11):
+        col_let = get_column_letter(col)
+        c = ws2.cell(r2_idx, col, f"=SUM({col_let}6:{col_let}{r2_idx - 1})")
+        c.font = f_tot; c.alignment = al_right
+
+    ws2.cell(r2_idx, 12, f"=SUM(L6:L{r2_idx - 1})").font = f_tot
+    ws2.cell(r2_idx, 12).alignment = al_right
+
+    col_w2 = [5, 9, 14, 12, 12, 16, 13, 13, 13, 14, 12, 14]
+    for ci, w in enumerate(col_w2, 1):
+        ws2.column_dimensions[get_column_letter(ci)].width = w
+
+    # SHEET 3: Date-Wise Production
+    ws3 = wb.create_sheet("Date-Wise Production")
+    ws3.views.sheetView[0].showGridLines = True
+
+    ws3.merge_cells("A1:K1")
+    c1 = ws3.cell(1, 1, "RADHU INDUSTRIES")
+    c1.font = f_title; c1.fill = fill_hdr; c1.alignment = al_center
+    ws3.row_dimensions[1].height = 28
+
+    ws3.merge_cells("A2:K2")
+    c2 = ws3.cell(2, 1, "17/5 MILE STONE DELHI MEERUT ROAD MURAD NAGAR U.P.-201206")
+    c2.font = f_sub; c2.fill = fill_sub; c2.alignment = al_center
+    ws3.row_dimensions[2].height = 18
+
+    ws3.merge_cells("A3:K3")
+    c3 = ws3.cell(3, 1, f"CYCLE TYRE — DAILY PRODUCTION LOG | {label}")
+    c3.font = f_heading; c3.fill = fill_hdr; c3.alignment = al_center
+    ws3.row_dimensions[3].height = 22
+
+    led_hdrs = ["Date", "CODE", "Tyre Item", "Size", "Ply / Box", "Material", "Brand", "All Curing", "1st Grade", "2nd Grade", "Rejected"]
+    ws3.row_dimensions[5].height = 22
+    for ci, h in enumerate(led_hdrs, 1):
+        c = ws3.cell(5, ci, h)
+        c.font = f_tbl_hdr; c.fill = fill_hdr; c.alignment = al_center; c.border = border_cell
+
+    sorted_entries = sorted(entries, key=lambda e: (e.date, sku_sort_key(e.tyre_item.sku if e.tyre_item else "", e.tyre_item.size if e.tyre_item else "")))
+    r3_idx = 6
+    for idx, e in enumerate(sorted_entries, 1):
+        rf = fill_zebra if idx % 2 == 0 else PatternFill("solid", fgColor="FFFFFF")
+        item = e.tyre_item
+        curing_qty = e.all_curing if e.all_curing > 0 else e.quantity
+        first_qty = e.first_grade if e.first_grade > 0 else e.quantity
+        sec_qty = e.second_grade or 0
+        rej_qty = e.rejected_grade or 0
+
+        vals3 = [
+            e.date.strftime("%d-%m-%Y"),
+            item.sku if item else "",
+            f"{item.size or ''} {item.box_type or ''} {item.material or ''} {item.brand or ''}".strip() if item else "",
+            item.size if item else "",
+            item.box_type if item else "",
+            item.material if item else "",
+            item.brand if item else "",
+            curing_qty,
+            first_qty,
+            sec_qty,
+            rej_qty,
+        ]
+
+        for ci, v in enumerate(vals3, 1):
+            c = ws3.cell(r3_idx, ci, v)
+            c.border = border_cell
+            c.fill = rf
+            c.font = f_bold if ci in [2, 8] else f_data
+            c.alignment = al_center if ci in [1, 2, 5, 6] else (al_left if ci in [3, 4, 7] else al_right)
+
+        r3_idx += 1
+
+    if sorted_entries:
+        ws3.merge_cells(f"A{r3_idx}:G{r3_idx}")
+        t3_lbl = ws3.cell(r3_idx, 1, "TOTAL")
+        t3_lbl.font = f_tot; t3_lbl.alignment = al_center; t3_lbl.fill = fill_tot
+        for col in range(1, 12):
+            ws3.cell(r3_idx, col).border = border_tot
+            ws3.cell(r3_idx, col).fill = fill_tot
+        for col in range(8, 12):
+            col_let = get_column_letter(col)
+            c = ws3.cell(r3_idx, col, f"=SUM({col_let}6:{col_let}{r3_idx - 1})")
+            c.font = f_tot; c.alignment = al_right
+
+    col_w3 = [12, 9, 28, 14, 12, 12, 16, 12, 12, 12, 12]
+    for ci, w in enumerate(col_w3, 1):
+        ws3.column_dimensions[get_column_letter(ci)].width = w
 
     output = BytesIO()
     wb.save(output)
     output.seek(0)
 
-    filename = f"DATE_WISE_PRODUCTION_{year}_{month:02d}.xlsx"
+    filename = f"CYCLE_TYRE_PRODUCTION_{year}_{month:02d}.xlsx"
     response = HttpResponse(
         output.getvalue(),
         content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
     response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    response["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response["Pragma"] = "no-cache"
+    response["Expires"] = "0"
     return response
 
 
