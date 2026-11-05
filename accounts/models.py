@@ -62,6 +62,13 @@ PAGES_MAP = {
         ('create_user', 'Create User'),
         ('edit_user', 'Edit User'),
     ],
+    'Raw Material': [
+        ('mixing_sheet', 'Mixing Sheet'),
+        ('rawmaterial_tally', 'Daily Stock Sheet & Tally Cards'),
+    ],
+    'Plant MIS': [
+        ('plant_performance', 'Plant Tracking Sheet & Rollup'),
+    ],
     'RADHU AI': [
         ('ai_agent', 'AI Agent Chat'),
         ('ai_audit_log', 'AI Audit Log'),
