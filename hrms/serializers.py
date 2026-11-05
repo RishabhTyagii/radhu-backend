@@ -38,10 +38,16 @@ class AttendanceSerializer(serializers.ModelSerializer):
 class ProductionSerializer(serializers.ModelSerializer):
     employee_code = serializers.CharField(source="employee.employee_code", read_only=True)
     employee_name = serializers.CharField(source="employee.name", read_only=True)
+    department_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Production
         fields = "__all__"
+
+    def get_department_name(self, instance):
+        if instance.employee and instance.employee.department:
+            return instance.employee.department.name
+        return None
 
 
 class AdvanceSerializer(serializers.ModelSerializer):
@@ -78,4 +84,10 @@ class SalarySerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Salary
-        fields = "__all__"
+        fields = [
+            "id", "employee", "employee_code", "employee_name", "department_name",
+            "month", "year",
+            "basic_salary", "overtime_amount", "production_amount", "incentive_amount",
+            "bonus", "advance", "deduction", "pf_amount", "esi_amount",
+            "net_salary", "generated_on",
+        ]

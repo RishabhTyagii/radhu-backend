@@ -41,11 +41,34 @@ class TallyInvoice(models.Model):
     party_name = models.CharField(max_length=200, blank=True)
     party_gstin = models.CharField(max_length=20, blank=True)
     party_address = models.TextField(blank=True)
+    party_pincode = models.CharField(max_length=20, blank=True)
     consignee_name = models.CharField(max_length=200, blank=True)
     consignee_gstin = models.CharField(max_length=20, blank=True)
+    consignee_address = models.TextField(blank=True)
+    consignee_state = models.CharField(max_length=100, blank=True)
+    consignee_pincode = models.CharField(max_length=20, blank=True)
     place_of_supply = models.CharField(max_length=100, blank=True)
     state_name = models.CharField(max_length=100, blank=True)
     gst_registration_type = models.CharField(max_length=50, blank=True)
+
+    # Transport & Logistics Details
+    transporter_name = models.CharField(max_length=200, blank=True)
+    transporter_id = models.CharField(max_length=100, blank=True)
+    vehicle_number = models.CharField(max_length=50, blank=True)
+    lr_number = models.CharField(max_length=100, blank=True, help_text="LR / RR / Doc No")
+    lr_date = models.CharField(max_length=50, blank=True)
+
+    # e-Invoice Details
+    irn = models.CharField(max_length=100, blank=True, help_text="e-Invoice IRN")
+    ack_number = models.CharField(max_length=50, blank=True, help_text="e-Invoice Ack No")
+    ack_date = models.CharField(max_length=50, blank=True, help_text="e-Invoice Ack Date")
+
+    # E-Way Bill Details
+    eway_bill_number = models.CharField(max_length=50, blank=True, help_text="E-Way Bill Number")
+    eway_bill_date = models.CharField(max_length=50, blank=True)
+
+    # Sales / GST Ledger
+    sales_ledger = models.CharField(max_length=200, blank=True, help_text="Primary Sales Ledger e.g. GST SALES cycle tyre @5%")
 
     taxable_value = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     cgst = models.DecimalField(max_digits=12, decimal_places=2, default=0)

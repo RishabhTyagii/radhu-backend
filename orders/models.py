@@ -7,7 +7,9 @@ from cycletyres.models import CycleTyreItem
 
 class Party(models.Model):
     user = models.ForeignKey(User, null=True, blank=True, on_delete=models.CASCADE, related_name='parties')
-    name = models.CharField(max_length=200, unique=True)
+    name = models.CharField(max_length=200)
+    gstin = models.CharField(max_length=50, blank=True, null=True)
+    address = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

@@ -32,6 +32,7 @@ INSTALLED_APPS = [
     'orders',
     'ai_agent',
     'rawmaterial',
+    'plantperformance',
 ]
 
 MIDDLEWARE = [

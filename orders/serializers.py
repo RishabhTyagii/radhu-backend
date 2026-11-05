@@ -5,7 +5,7 @@ from .models import Party, Order, OrderItem
 class PartySerializer(serializers.ModelSerializer):
     class Meta:
         model = Party
-        fields = ['id', 'user', 'name', 'created_at']
+        fields = ['id', 'user', 'name', 'gstin', 'address', 'created_at']
 
 
 class OrderItemSerializer(serializers.ModelSerializer):
@@ -24,6 +24,8 @@ class OrderItemSerializer(serializers.ModelSerializer):
 
 class OrderSerializer(serializers.ModelSerializer):
     party_name = serializers.CharField(source='party.name', read_only=True)
+    party_gstin = serializers.CharField(source='party.gstin', read_only=True)
+    party_address = serializers.CharField(source='party.address', read_only=True)
     user_name = serializers.CharField(source='user.username', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     is_overdue = serializers.BooleanField(read_only=True)
@@ -34,7 +36,7 @@ class OrderSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Order
-        fields = ['id', 'user', 'user_name', 'party', 'party_name', 'date',
+        fields = ['id', 'user', 'user_name', 'party', 'party_name', 'party_gstin', 'party_address', 'date',
                   'deadline', 'status', 'status_display', 'notes', 'is_overdue',
                   'resolved_by', 'resolved_by_name', 'resolved_at', 'created_at',
                   'items', 'total_quantity', 'total_amount']

@@ -1005,25 +1005,29 @@ def daily_summary(request):
     if request.method == "POST":
         date_val = request.data.get("date") or today
         def to_dec(v):
-            try: return Decimal(str(v)) if v else Decimal("0.00")
+            try: return Decimal(str(v).replace(',', '').strip()) if v is not None and str(v).strip() != "" else Decimal("0.00")
             except: return Decimal("0.00")
 
         def to_int(v):
-            try: return int(v) if v else 0
+            try: return int(float(str(v).replace(',', '').strip())) if v is not None and str(v).strip() != "" else 0
             except: return 0
 
-        manual, created = CycleTyreDailyManualEntry.objects.update_or_create(
-            date=date_val,
-            defaults={
-                "packing_pcs": to_int(request.data.get("packing_pcs")),
-                "parchi_kg": to_dec(request.data.get("parchi_kg")),
-                "mixing_actual_compound": to_dec(request.data.get("mixing_actual_compound")),
-                "chakka": to_dec(request.data.get("chakka")),
-                "calander_bias_cutt": to_dec(request.data.get("calander_bias_cutt")),
-                "packing_wastage": to_dec(request.data.get("packing_wastage")),
-                "tar": to_dec(request.data.get("tar")),
-            }
-        )
+        manual, created = CycleTyreDailyManualEntry.objects.get_or_create(date=date_val)
+        if "packing_pcs" in request.data:
+            manual.packing_pcs = to_int(request.data.get("packing_pcs"))
+        if "parchi_kg" in request.data:
+            manual.parchi_kg = to_dec(request.data.get("parchi_kg"))
+        if "mixing_actual_compound" in request.data:
+            manual.mixing_actual_compound = to_dec(request.data.get("mixing_actual_compound"))
+        if "chakka" in request.data:
+            manual.chakka = to_dec(request.data.get("chakka"))
+        if "calander_bias_cutt" in request.data:
+            manual.calander_bias_cutt = to_dec(request.data.get("calander_bias_cutt"))
+        if "packing_wastage" in request.data:
+            manual.packing_wastage = to_dec(request.data.get("packing_wastage"))
+        if "tar" in request.data:
+            manual.tar = to_dec(request.data.get("tar"))
+        manual.save()
         return Response(CycleTyreDailyManualEntrySerializer(manual).data)
 
     start_date_str = request.query_params.get("start_date") or request.query_params.get("from_date")
@@ -1040,13 +1044,11 @@ def daily_summary(request):
 
     by_date = {}
     for e in prod_entries:
-        d = by_date.setdefault(e.date, {"production_pcs": 0, "packing_pcs": 0, "theoretical_kg": Decimal("0.00")})
+        d = by_date.setdefault(e.date, {"production_pcs": 0, "theoretical_kg": Decimal("0.00")})
         curing_qty = e.all_curing if e.all_curing > 0 else e.quantity
-        first_grade_qty = e.first_grade if e.first_grade > 0 else e.quantity
         weight = e.tyre_item.weight or Decimal("0.00")
 
         d["production_pcs"] += curing_qty
-        d["packing_pcs"] += first_grade_qty
         d["theoretical_kg"] += Decimal(str(curing_qty)) * weight
 
     manual_entries = {m.date: m for m in CycleTyreDailyManualEntry.objects.filter(date__gte=start_date, date__lte=end_date)}
@@ -1062,8 +1064,8 @@ def daily_summary(request):
         stats = by_date.get(d, {"production_pcs": 0, "packing_pcs": 0, "theoretical_kg": Decimal("0.00")})
         manual = manual_entries.get(d)
 
-        # Allow manual override for packing_pcs if present in manual entry
-        packing_pcs_val = manual.packing_pcs if (manual and manual.packing_pcs is not None and manual.packing_pcs > 0) else stats["packing_pcs"]
+        # Packing PCS is purely manual
+        packing_pcs_val = manual.packing_pcs if (manual and manual.packing_pcs is not None) else 0
         parchi_kg = manual.parchi_kg if manual else Decimal("0.00")
         mixing_actual = manual.mixing_actual_compound if manual else Decimal("0.00")
         chakka = manual.chakka if manual else Decimal("0.00")

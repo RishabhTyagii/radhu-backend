@@ -34,7 +34,8 @@ def _build_stock_data(user):
             'category': 'auto_tyre',
             'category_label': 'Auto Tyre',
             'item_id': item.id,
-            'display': f"{item.tyre} {item.pattern} {item.type}",
+            'display': f"{item.tyre} {item.pattern}",
+            'item_type': item.type,
             'total_stock': item.stock,
             'my_orders': my_qty,
             'other_orders': other_qty,
@@ -56,7 +57,8 @@ def _build_stock_data(user):
             'category': 'cycle_tube',
             'category_label': 'Cycle Tube',
             'item_id': item.id,
-            'display': f"{item.size} {item.type} {item.brand}",
+            'display': f"{item.size} {item.brand}",
+            'item_type': item.type,
             'total_stock': item.stock,
             'my_orders': my_qty,
             'other_orders': other_qty,
@@ -78,7 +80,8 @@ def _build_stock_data(user):
             'category': 'cycle_tyre',
             'category_label': 'Cycle Tyre',
             'item_id': item.id,
-            'display': f"{item.size} {item.box_type} {item.brand}",
+            'display': f"{item.size} {item.brand}",
+            'item_type': item.box_type,
             'total_stock': item.stock,
             'my_orders': my_qty,
             'other_orders': other_qty,
@@ -94,20 +97,77 @@ def _build_stock_data(user):
 @permission_classes([IsAuthenticated])
 def party_list(request):
     if request.method == "GET":
-        parties = Party.objects.all()
+        if request.user.is_superuser:
+            parties = Party.objects.all()
+        else:
+            parties = Party.objects.filter(user=request.user)
         return Response(PartySerializer(parties, many=True).data)
 
     name = str(request.data.get("name", "")).strip()
+    gstin = str(request.data.get("gstin", "")).strip()
+    address = str(request.data.get("address", "")).strip()
+    
     if not name:
         return Response({"error": "Party name is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-    # Check case-insensitive existing party
-    existing = Party.objects.filter(name__iexact=name).first()
+    # Check case-insensitive existing party for this user
+    if request.user.is_superuser:
+        existing = Party.objects.filter(name__iexact=name).first()
+    else:
+        existing = Party.objects.filter(name__iexact=name, user=request.user).first()
+        
     if existing:
+        # Update existing party details if provided
+        if gstin: existing.gstin = gstin
+        if address: existing.address = address
+        existing.save()
         return Response(PartySerializer(existing).data, status=status.HTTP_200_OK)
 
-    party = Party.objects.create(user=request.user, name=name)
+    party = Party.objects.create(user=request.user, name=name, gstin=gstin, address=address)
     return Response(PartySerializer(party).data, status=status.HTTP_201_CREATED)
+
+
+@csrf_exempt
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def tally_parties(request):
+    try:
+        results = {}
+        
+        # 1. First get all parties from Party table (permanent master list)
+        for p in Party.objects.exclude(name__iexact="cash").order_by("name"):
+            pname = p.name.strip()
+            if pname:
+                results[pname.lower()] = {
+                    "name": pname,
+                    "gstin": p.gstin or "",
+                    "address": p.address or ""
+                }
+
+        # 2. Also check any synced Tally Invoices if available
+        try:
+            from tallysync.models import TallyInvoice
+            for inv in TallyInvoice.objects.exclude(party_name__iexact="cash").values('party_name', 'party_gstin', 'party_address').distinct():
+                pname = str(inv.get('party_name') or '').strip()
+                if pname:
+                    key = pname.lower()
+                    gst = str(inv.get('party_gstin') or '').strip()
+                    addr = str(inv.get('party_address') or '').strip()
+                    if key not in results:
+                        results[key] = {"name": pname, "gstin": gst, "address": addr}
+                    else:
+                        if gst and not results[key]["gstin"]:
+                            results[key]["gstin"] = gst
+                        if addr and not results[key]["address"]:
+                            results[key]["address"] = addr
+        except Exception:
+            pass
+
+        # Sort alphabetically by party name
+        formatted = sorted(results.values(), key=lambda x: x["name"].lower())
+        return Response(formatted, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @csrf_exempt
@@ -115,6 +175,8 @@ def party_list(request):
 @permission_classes([IsAuthenticated])
 def party_detail(request, pk):
     party = get_object_or_404(Party, pk=pk)
+    if not request.user.is_superuser and party.user != request.user:
+        return Response({"error": "Unauthorized"}, status=status.HTTP_403_FORBIDDEN)
     party.delete()
     return Response({"ok": True})
 
@@ -134,7 +196,8 @@ def stock_catalog(request):
 @permission_classes([IsAuthenticated])
 def order_list(request):
     if request.method == "GET":
-        is_admin = request.user.is_superuser or request.query_params.get("all") == "true"
+        # Only superuser can see all orders
+        is_admin = request.user.is_superuser and request.query_params.get("all") == "true"
         if is_admin:
             orders = Order.objects.all().select_related("user", "party", "resolved_by").prefetch_related("items")
         else:

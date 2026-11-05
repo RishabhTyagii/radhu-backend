@@ -139,6 +139,22 @@ class Production(models.Model):
         return f"{self.employee.name} - {self.product_name} ({self.date})"
 
 
+# Permanent per-worker per-item piece rate store
+class WorkerItemRate(models.Model):
+    """Stores the agreed piece-rate for a specific employee + item combination."""
+    employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name="item_rates")
+    product_name = models.CharField(max_length=150, db_index=True)
+    rate = models.DecimalField(max_digits=10, decimal_places=6)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ("employee", "product_name")
+        ordering = ["employee", "product_name"]
+
+    def __str__(self):
+        return f"{self.employee.name} | {self.product_name} | Rs {self.rate}"
+
+
 # Advance
 class Advance(models.Model):
     employee = models.ForeignKey(Employee, on_delete=models.CASCADE)
@@ -189,6 +205,7 @@ class Salary(models.Model):
     basic_salary = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     overtime_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     production_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    incentive_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     bonus = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     advance = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     deduction = models.DecimalField(max_digits=12, decimal_places=2, default=0)

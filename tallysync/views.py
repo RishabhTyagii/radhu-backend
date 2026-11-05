@@ -31,6 +31,7 @@ def _to_decimal(value):
 
 def _reduce_stock_for_item(module, item, qty, voucher_number, voucher_date, party_name, tally_item_name="", pending_id=None):
     """Create a sale/dispatch entry for this item, reducing its appropriate stock bucket:
+       - Export bills (RI/EX/ prefix): deduct from on_hold_export stock (tyre only)
        - 1st Grade / Main Stock
        - B Grade (2nd Grade Stock)
        - C Grade (3rd Grade / Reject / RFM Stock)
@@ -49,11 +50,22 @@ def _reduce_stock_for_item(module, item, qty, voucher_number, voucher_date, part
     is_c_grade = (category_override == "cgrade") or any(k in name_lower for k in ["c grade", "c-grade", "3rd grade", "3rd", "c_grade", "c.grade", "reject"])
     is_b_grade = ((category_override == "bgrade") or any(k in name_lower for k in ["b grade", "b-grade", "2nd grade", "2nd", "b_grade", "b.grade"])) and not is_c_grade
 
+    # Detect Export bills by voucher number prefix RI/EX/
+    is_export = str(voucher_number or "").upper().startswith("RI/EX/")
+
     base_remark = f"Tally auto-sync | Party: {party_name or '-'}"
+    if is_export:
+        base_remark += " [EXPORT]"
 
     if module == "tyre":
         from stock.models import DailyEntry
-        if is_c_grade:
+        if is_export:
+            # Export bills → deduct from on_hold_export
+            bucket = "on_hold_export"
+            current = getattr(item, "on_hold_export", 0) or 0
+            stock_field = "on_hold_export"
+            remark = f"{base_remark} [Export On-Hold Stock]"
+        elif is_c_grade:
             bucket = "third_stock"
             current = getattr(item, "third_stock", 0)
             stock_field = "third_stock"
@@ -196,15 +208,42 @@ def tally_webhook(request):
     if not voucher_number:
         return JsonResponse({"error": "voucher_number is required"}, status=400)
 
-    if TallyInvoice.objects.filter(voucher_number=voucher_number).exists():
-        return JsonResponse({"status": "already_synced", "voucher_number": voucher_number}, status=200)
-
+    voucher_date_raw = payload.get("date", "")
     try:
-        voucher_date = datetime.datetime.strptime(payload.get("date", ""), "%Y-%m-%d").date()
+        voucher_date = datetime.datetime.strptime(voucher_date_raw, "%Y-%m-%d").date()
     except ValueError:
         voucher_date = datetime.date.today()
 
     party_name = str(payload.get("party_name", "")).strip()
+    party_gstin = str(payload.get("party_gstin", "")).strip()
+    party_address = str(payload.get("party_address", "")).strip()
+    party_pincode = str(payload.get("party_pincode", "")).strip()
+    consignee_name = str(payload.get("consignee_name", "")).strip()
+    consignee_gstin = str(payload.get("consignee_gstin", "")).strip()
+    consignee_address = str(payload.get("consignee_address", "")).strip()
+    consignee_state = str(payload.get("consignee_state", "")).strip()
+    consignee_pincode = str(payload.get("consignee_pincode", "")).strip()
+    place_of_supply = str(payload.get("place_of_supply", "")).strip()
+    state_name = str(payload.get("state_name", "")).strip()
+    gst_registration_type = str(payload.get("gst_registration_type", "")).strip()
+
+    # Transport & Logistics
+    transporter_name = str(payload.get("transporter_name", "")).strip()
+    transporter_id = str(payload.get("transporter_id", "")).strip()
+    vehicle_number = str(payload.get("vehicle_number", "")).strip()
+    lr_number = str(payload.get("lr_number", "")).strip()
+    lr_date = str(payload.get("lr_date", "")).strip()
+
+    # e-Invoice & E-Way Bill
+    irn = str(payload.get("irn", "")).strip()
+    ack_number = str(payload.get("ack_number", "")).strip()
+    ack_date = str(payload.get("ack_date", "")).strip()
+    eway_bill_number = str(payload.get("eway_bill_number", "")).strip()
+    eway_bill_date = str(payload.get("eway_bill_date", "")).strip()
+
+    # Sales / GST Ledger
+    sales_ledger = str(payload.get("sales_ledger", "")).strip()
+
     items = payload.get("items", [])
 
     cgst_val = _to_decimal(payload.get("cgst"))
@@ -225,17 +264,68 @@ def tally_webhook(request):
 
     payload["taxable_value"] = float(taxable_val)
 
+    # Check if invoice already exists - if so, update fields without double deducting stock
+    existing = TallyInvoice.objects.filter(voucher_number=voucher_number).first()
+    if existing:
+        existing.voucher_date = voucher_date
+        existing.party_name = party_name
+        existing.party_gstin = party_gstin
+        existing.party_address = party_address
+        existing.party_pincode = party_pincode
+        existing.consignee_name = consignee_name
+        existing.consignee_gstin = consignee_gstin
+        existing.consignee_address = consignee_address
+        existing.consignee_state = consignee_state
+        existing.consignee_pincode = consignee_pincode
+        existing.place_of_supply = place_of_supply
+        existing.state_name = state_name
+        existing.gst_registration_type = gst_registration_type
+        existing.transporter_name = transporter_name
+        existing.transporter_id = transporter_id
+        existing.vehicle_number = vehicle_number
+        existing.lr_number = lr_number
+        existing.lr_date = lr_date
+        existing.irn = irn
+        existing.ack_number = ack_number
+        existing.ack_date = ack_date
+        existing.eway_bill_number = eway_bill_number
+        existing.eway_bill_date = eway_bill_date
+        existing.sales_ledger = sales_ledger
+        existing.taxable_value = taxable_val
+        existing.cgst = cgst_val
+        existing.sgst = sgst_val
+        existing.igst = igst_val
+        existing.total_value = total_val
+        existing.raw_payload = json.dumps(payload, indent=2)
+        existing.save()
+        return JsonResponse({"status": "updated", "voucher_number": voucher_number}, status=200)
+
     invoice = TallyInvoice.objects.create(
         voucher_number=voucher_number,
         voucher_date=voucher_date,
         party_name=party_name,
-        party_gstin=str(payload.get("party_gstin", "")).strip(),
-        party_address=str(payload.get("party_address", "")).strip(),
-        consignee_name=str(payload.get("consignee_name", "")).strip(),
-        consignee_gstin=str(payload.get("consignee_gstin", "")).strip(),
-        place_of_supply=str(payload.get("place_of_supply", "")).strip(),
-        state_name=str(payload.get("state_name", "")).strip(),
-        gst_registration_type=str(payload.get("gst_registration_type", "")).strip(),
+        party_gstin=party_gstin,
+        party_address=party_address,
+        party_pincode=party_pincode,
+        consignee_name=consignee_name,
+        consignee_gstin=consignee_gstin,
+        consignee_address=consignee_address,
+        consignee_state=consignee_state,
+        consignee_pincode=consignee_pincode,
+        place_of_supply=place_of_supply,
+        state_name=state_name,
+        gst_registration_type=gst_registration_type,
+        transporter_name=transporter_name,
+        transporter_id=transporter_id,
+        vehicle_number=vehicle_number,
+        lr_number=lr_number,
+        lr_date=lr_date,
+        irn=irn,
+        ack_number=ack_number,
+        ack_date=ack_date,
+        eway_bill_number=eway_bill_number,
+        eway_bill_date=eway_bill_date,
+        sales_ledger=sales_ledger,
         taxable_value=taxable_val,
         cgst=cgst_val,
         sgst=sgst_val,
@@ -301,6 +391,7 @@ def sales_summary(request):
     from_date_str = request.query_params.get("from_date", "")
     to_date_str = request.query_params.get("to_date", "")
     party_query = request.query_params.get("party", "")
+    ledger_query = request.query_params.get("ledger", "").strip()
 
     invoices = TallyInvoice.objects.all()
 
@@ -315,15 +406,17 @@ def sales_summary(request):
                 invoices = invoices.filter(voucher_date__lte=datetime.datetime.strptime(to_date_str, "%Y-%m-%d").date())
             except ValueError:
                 pass
-    else:
-        if month_str:
+    elif month_str:
+        if month_str.lower() != "all":
             try:
                 y, m = month_str.split("-")
                 year, month = int(y), int(m)
+                invoices = invoices.filter(voucher_date__year=year, voucher_date__month=month)
             except ValueError:
-                year, month = today.year, today.month
-        else:
-            year, month = today.year, today.month
+                pass
+    # If month_str is empty, default to current month unless all_months=true or view_all=true
+    elif request.query_params.get("all_months") != "true" and request.query_params.get("view_all") != "true" and not party_query:
+        year, month = today.year, today.month
         invoices = invoices.filter(voucher_date__year=year, voucher_date__month=month)
 
     if party_query:
@@ -332,6 +425,14 @@ def sales_summary(request):
             Q(voucher_number__icontains=party_query) |
             Q(party_gstin__icontains=party_query)
         )
+
+    if ledger_query:
+        ledger_list = [l.strip() for l in ledger_query.split(",") if l.strip()]
+        if ledger_list:
+            ledger_q = Q()
+            for l in ledger_list:
+                ledger_q |= Q(sales_ledger__icontains=l) | Q(raw_payload__icontains=l)
+            invoices = invoices.filter(ledger_q)
 
     agg = invoices.aggregate(
         total_sale=Sum("total_value"),
@@ -345,8 +446,44 @@ def sales_summary(request):
     total_sgst = agg["total_sgst"] or 0
     total_igst = agg["total_igst"] or 0
 
-    invoices_ordered = invoices.order_by("-voucher_date", "-pk")
-    serialized = TallyInvoiceListSerializer(invoices_ordered[:200], many=True).data
+    # Calculate total pcs across filtered invoices
+    total_pcs = 0
+    for inv in invoices.only("raw_payload"):
+        try:
+            payload = json.loads(inv.raw_payload or "{}")
+            total_pcs += sum(int(it.get("qty", 0) or 0) for it in payload.get("items", []))
+        except Exception:
+            pass
+
+    # Extract distinct ledger names strictly from synced Tally invoices
+    ledger_set = set()
+    raw_ledgers = TallyInvoice.objects.exclude(sales_ledger__isnull=True).exclude(sales_ledger="").values_list("sales_ledger", flat=True).distinct()
+    for l in raw_ledgers:
+        if l:
+            for part in str(l).split(","):
+                cleaned = part.strip()
+                if cleaned:
+                    ledger_set.add(cleaned)
+
+    # Also scan raw_payload for any item-level ledgers
+    for inv in TallyInvoice.objects.only("raw_payload"):
+        try:
+            payload = json.loads(inv.raw_payload or "{}")
+            sl = payload.get("sales_ledger")
+            if sl:
+                for part in str(sl).split(","):
+                    c = part.strip()
+                    if c: ledger_set.add(c)
+            for it in payload.get("items", []):
+                il = it.get("ledger") or it.get("sales_ledger")
+                if il:
+                    c = str(il).strip()
+                    if c: ledger_set.add(c)
+        except Exception:
+            pass
+
+    invoices_ordered = invoices.order_by("-pk", "-voucher_date")
+    serialized = TallyInvoiceListSerializer(invoices_ordered[:1000], many=True).data
 
     return Response({
         "invoices": serialized,
@@ -357,9 +494,11 @@ def sales_summary(request):
             "total_sgst": str(total_sgst),
             "total_igst": str(total_igst),
             "total_gst": str(total_cgst + total_sgst + total_igst),
+            "total_pcs": total_pcs,
         },
         "invoice_count": invoices.count(),
         "unmapped_count": invoices.filter(stock_synced=False).count(),
+        "available_ledgers": sorted(list(ledger_set)),
     })
 
 

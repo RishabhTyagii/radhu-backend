@@ -14,6 +14,7 @@ urlpatterns = [
     path('api/accounts/', include('accounts.urls')),
     path('api/ai/', include('ai_agent.urls')),
     path('api/rawmaterial/', include('rawmaterial.urls')),
+    path('api/plant-performance/', include('plantperformance.urls')),
 ]
 
 admin.site.site_header = "Radhu Industries ERP Admin"
