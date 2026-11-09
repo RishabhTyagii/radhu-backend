@@ -843,10 +843,10 @@ def factory_intelligence_api(request):
     daily_series = []
     for row in daily_raw:
         daily_series.append({
-            "day": row.get("day"),
+            "day": row.get("day_num", row.get("day")),
             "date": str(row.get("date", "")),
-            "tyres": row.get("output", row.get("tyres", 0)),
-            "is_operating": row.get("is_operating", True),
+            "tyres": row.get("total_tyres", row.get("output", row.get("tyres", 0))),
+            "is_operating": row.get("is_operating_day", row.get("is_operating", True)),
             "z_score": row.get("z_score"),
             "anomaly_level": row.get("anomaly_level", "NORMAL"),
         })
@@ -893,6 +893,7 @@ def factory_intelligence_api(request):
 
     # WS07 Commercial — actual service keys
     invoices_count = ws07.get("commercial_invoices_count")
+    invoices_total_value = ws07.get("total_invoiced_value_inr", 0)
     top_parties = ws07.get("top_commercial_parties", [])
     top_customers = []
     for p in top_parties:
@@ -1008,7 +1009,7 @@ def factory_intelligence_api(request):
                 },
                 "commercial": {
                     "total_invoices_count": invoices_count,
-                    "total_invoiced_value_inr": ws07.get("total_invoiced_value_inr"),
+                    "total_invoiced_value_inr": invoices_total_value,
                     "top_customers": top_customers,
                 },
                 "audit_register": {
