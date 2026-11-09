@@ -176,6 +176,8 @@ def get_factory_intelligence_data(month_str=None, user=None):
             'total_tyres': tot_tyres,
             'is_operating_day': is_operating,
             'is_planned_off': is_planned_off,
+            'z_score': None,
+            'anomaly_level': 'NON_OPERATING' if not is_operating else 'PENDING',
         })
 
     # Trailing 7-day velocity smoothing
@@ -208,6 +210,21 @@ def get_factory_intelligence_data(month_str=None, user=None):
                     })
     else:
         op_mean, op_stdev, op_lcl, op_ucl = 0.0, 0.0, 0.0, 0.0
+
+    # Annotate daily_rows with z_score and anomaly_level from 2-sigma screening
+    outlier_dates = {}
+    for o in outlier_list:
+        outlier_dates[o['date']] = o['z_score']
+    if len(operating_volumes) >= 2:
+        for r in daily_rows:
+            if r['is_operating_day']:
+                val = r['total_tyres']
+                z = round((val - op_mean) / op_stdev, 2)
+                r['z_score'] = z
+                if val < op_lcl or val > op_ucl:
+                    r['anomaly_level'] = 'ANOMALY'
+                else:
+                    r['anomaly_level'] = 'NORMAL'
 
     # Total factory tyre curing
     total_factory_tyres = ct_curing + at_curing
@@ -445,8 +462,17 @@ def get_factory_intelligence_data(month_str=None, user=None):
         .order_by('-vouchers')[:8]
     )
 
+    invoices_total_agg = invoices_qs.aggregate(total=Sum('total_value'))
+    invoices_total_value = round(float(invoices_total_agg['total'] or 0.0), 2)
+    top_parties = list(
+        invoices_qs.values('party_name')
+        .annotate(vouchers=Count('id'), total_amount=Sum('total_value'))
+        .order_by('-vouchers')[:10]
+    )
+
     commercial_summary = {
         'commercial_invoices_count': invoices_count,
+        'total_invoiced_value_inr': invoices_total_value,
         'top_commercial_parties': top_parties,
         'dispatch_tracking_status': 'ACTIVE TALLY SYNC WEBHOOK INTEGRATED',
     }
