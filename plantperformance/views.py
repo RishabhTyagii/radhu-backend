@@ -6,7 +6,7 @@ from django.db.models import Sum, Count, Q
 from django.shortcuts import get_object_or_404
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 
 from .models import PlantPerformanceDailyLog
@@ -377,7 +377,7 @@ def daily_plant_performance(request):
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 def save_daily_manual_log(request):
     """
     Saves or updates manual log fields for a date:
@@ -415,7 +415,7 @@ def save_daily_manual_log(request):
 
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 def monthly_summary_rollup(request):
     """
     Returns high-level department roll-up summary matching Sheet1 of the Excel workbook.
@@ -520,7 +520,7 @@ def monthly_summary_rollup(request):
 
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 def plant_advanced_analytics(request):
     """
     Advanced Factory Intelligence & Predictive Analytics Endpoint.
@@ -814,7 +814,7 @@ def plant_advanced_analytics(request):
 from .intelligence_service import get_factory_intelligence_data
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 def factory_intelligence_api(request):
     """
     Complete Factory Intelligence Endpoint across all 8 Workspaces.
