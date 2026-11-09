@@ -1,3 +1,4 @@
+import statistics
 import calendar
 import datetime
 from decimal import Decimal
@@ -515,4 +516,296 @@ def monthly_summary_rollup(request):
         "total_ot": totals.get("total_ot", 0),
         "total_ave_att": totals.get("total_ave", 0),
         "departments": departments,
+    })
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def plant_advanced_analytics(request):
+    """
+    Advanced Factory Intelligence & Predictive Analytics Endpoint.
+    Grounded strictly in RDS MySQL models: Mixing, Cycle Tyre, Auto Tyre, Cycle Tube, and HRMS.
+    """
+    month_str = request.query_params.get("month")
+    today = datetime.date.today()
+
+    if month_str:
+        try:
+            year, month = map(int, month_str.split("-"))
+        except ValueError:
+            year, month = today.year, today.month
+    else:
+        year, month = today.year, today.month
+
+    # Previous month string
+    if month == 1:
+        prev_year, prev_month = year - 1, 12
+    else:
+        prev_year, prev_month = year, month - 1
+    prev_month_str = f"{prev_year}-{prev_month:02d}"
+
+    # Query current month and previous month
+    cur_res = daily_plant_performance(request._request).data
+    
+    # Fake request for previous month
+    from rest_framework.test import APIRequestFactory
+    req_prev = APIRequestFactory().get(f"/api/plant-performance/daily/?month={prev_month_str}")
+    req_prev.user = request.user
+    prev_res = daily_plant_performance(req_prev).data
+
+    c_tot = cur_res.get("totals", {})
+    p_tot = prev_res.get("totals", {})
+    rows = cur_res.get("rows", [])
+
+    # 1. Month-on-Month Comparison
+    def mom_delta(curr_val, prev_val, round_digits=1):
+        c = float(curr_val or 0)
+        p = float(prev_val or 0)
+        diff = c - p
+        pct = (diff / p * 100) if p != 0 else (100.0 if c > 0 else 0.0)
+        return {
+            "current": round(c, round_digits),
+            "previous": round(p, round_digits),
+            "diff": round(diff, round_digits),
+            "pct": round(pct, 1),
+            "direction": "up" if diff > 0 else ("down" if diff < 0 else "neutral"),
+        }
+
+    mom = {
+        "cycle_tyre_curing": mom_delta(c_tot.get("ct_cur_prod_num"), p_tot.get("ct_cur_prod_num"), 0),
+        "auto_tyre_curing": mom_delta(c_tot.get("at_cur_prod_num"), p_tot.get("at_cur_prod_num"), 0),
+        "tube_curing": mom_delta(c_tot.get("tb_cur_prod_num"), p_tot.get("tb_cur_prod_num"), 0),
+        "mixing_output_kg": mom_delta(c_tot.get("mix_final"), p_tot.get("mix_final"), 2),
+        "total_manpower": mom_delta(c_tot.get("total_mp"), p_tot.get("total_mp"), 0),
+        "total_overtime_hrs": mom_delta(c_tot.get("total_ot"), p_tot.get("total_ot"), 1),
+        "calender_prod_kg": mom_delta(c_tot.get("cal_prod_kg"), p_tot.get("cal_prod_kg"), 2),
+    }
+
+    # 2. Plant Intelligence Summaries
+    ct_curing = c_tot.get("ct_cur_prod_num", 0) or 0
+    ct_packed = c_tot.get("ct_pck_prod_num", 0) or 0
+    ct_rejection = c_tot.get("ct_cur_tot_rej", 0) or 0
+    ct_rej_rate = safe_div(ct_rejection * 100, ct_curing)
+    ct_packing_efficiency = safe_div(ct_packed * 100, ct_curing)
+
+    at_curing = c_tot.get("at_cur_prod_num", 0) or 0
+    at_building = c_tot.get("at_bld_prod_num", 0) or 0
+    at_rejection = c_tot.get("at_cur_tot_rej", 0) or 0
+    at_rej_rate = safe_div(at_rejection * 100, at_curing)
+    at_build_cure_gap = at_curing - at_building
+
+    tube_curing = c_tot.get("tb_cur_prod_num", 0) or 0
+    tube_packed = c_tot.get("tb_pck_pack_prod", 0) or 0
+    tube_scrap = c_tot.get("tb_pck_scrap", 0) or 0
+    tube_packing_efficiency = safe_div(tube_packed * 100, tube_curing)
+
+    mix_final = c_tot.get("mix_final", 0) or 0
+    mix_actual = c_tot.get("mix_actual", 0) or 0
+    mix_variation = c_tot.get("mix_variation", 0) or 0
+    cal_fab_scrap = c_tot.get("cal_fab_scrap", 0) or 0
+    cal_com_scrap = c_tot.get("cal_com_scrap", 0) or 0
+    at_fab_scrap = c_tot.get("at_bld_fab_scrap", 0) or 0
+    total_scrap_kg = cal_fab_scrap + cal_com_scrap + at_fab_scrap + tube_scrap
+
+    ct_theo = c_tot.get("ct_cur_theo_con", 0) or 0
+    at_theo = c_tot.get("at_cur_theo_con", 0) or 0
+    total_theo_compound = ct_theo + at_theo
+    compound_buffer_kg = mix_final - total_theo_compound
+
+    plant_summaries = {
+        "cycle_tyre": {
+            "curing_total": ct_curing,
+            "packing_total": ct_packed,
+            "rejection_total": ct_rejection,
+            "rejection_rate_pct": ct_rej_rate,
+            "packing_efficiency_pct": ct_packing_efficiency,
+            "wip_accumulation": max(0, ct_curing - ct_packed),
+            "avg_output_per_worker": c_tot.get("ct_cur_avg_prod", 0),
+        },
+        "auto_tyre": {
+            "curing_total": at_curing,
+            "building_total": at_building,
+            "rejection_total": at_rejection,
+            "rejection_rate_pct": at_rej_rate,
+            "building_curing_gap": at_build_cure_gap,
+            "avg_output_per_worker": c_tot.get("at_cur_avg_prod", 0),
+        },
+        "cycle_tube": {
+            "curing_total": tube_curing,
+            "packing_total": tube_packed,
+            "scrap_total_kg": tube_scrap,
+            "packing_efficiency_pct": tube_packing_efficiency,
+            "avg_output_per_worker": c_tot.get("tb_cur_avg_prod", 0),
+        },
+        "mixing": {
+            "final_compound_kg": mix_final,
+            "actual_mixed_kg": mix_actual,
+            "mixing_variation_kg": mix_variation,
+            "total_scrap_kg": total_scrap_kg,
+            "theoretical_demand_kg": total_theo_compound,
+            "buffer_generated_kg": compound_buffer_kg,
+            "scrap_rate_pct": safe_div(total_scrap_kg * 100, mix_final),
+        },
+    }
+
+    # 3. Daily Trends (Time Series)
+    daily_trends = []
+    total_tyres_list = []
+
+    for r in rows:
+        d_str = r.get("date")
+        ct_c = r.get("ct_cur_prod_num", 0) or 0
+        at_c = r.get("at_cur_prod_num", 0) or 0
+        tb_c = r.get("tb_cur_prod_num", 0) or 0
+        m_kg = r.get("mix_final", 0) or 0
+        tot_tyres = ct_c + at_c
+        total_tyres_list.append(tot_tyres)
+
+        daily_trends.append({
+            "date": d_str,
+            "day": r.get("day"),
+            "cycle_tyre": ct_c,
+            "auto_tyre": at_c,
+            "tube": tb_c,
+            "mixing_kg": m_kg,
+            "total_tyres": tot_tyres,
+            "manpower": r.get("total_mp", 0),
+            "ot_hours": r.get("total_ot", 0),
+        })
+
+    # 7-day rolling average
+    rolling_7d = []
+    for i in range(len(total_tyres_list)):
+        start_idx = max(0, i - 6)
+        window = total_tyres_list[start_idx : i + 1]
+        rolling_7d.append(round(sum(window) / len(window), 1) if window else 0)
+
+    for idx, dt in enumerate(daily_trends):
+        dt["rolling_7d_avg"] = rolling_7d[idx]
+
+    # 4. Statistical Anomalies
+    anomalies = []
+    active_ct = [x["cycle_tyre"] for x in daily_trends if x["cycle_tyre"] > 0]
+    if len(active_ct) > 2:
+        mean_ct = statistics.mean(active_ct)
+        std_ct = statistics.stdev(active_ct)
+        for r in rows:
+            val = r.get("ct_cur_prod_num", 0) or 0
+            if val > 0 and (val < mean_ct - 2 * std_ct or val > mean_ct + 2 * std_ct):
+                anomalies.append({
+                    "date": r.get("date"),
+                    "type": "statistical_outlier",
+                    "severity": "high" if val < mean_ct - 2 * std_ct else "info",
+                    "title": f"Cycle Tyre Curing Output Deviation ({val:,} pcs)",
+                    "detail": f"Output on {r.get('date')} differed by {val - mean_ct:+.0f} pcs from month mean ({mean_ct:.0f} ± {std_ct:.0f}).",
+                })
+
+    for r in rows:
+        ot = r.get("total_ot", 0) or 0
+        tot_tyres = (r.get("ct_cur_prod_num", 0) or 0) + (r.get("at_cur_prod_num", 0) or 0)
+        if ot > 50 and tot_tyres == 0:
+            anomalies.append({
+                "date": r.get("date"),
+                "type": "operational_disconnect",
+                "severity": "warning",
+                "title": f"High Overtime with Zero Production on {r.get('date')}",
+                "detail": f"{ot} OT hours logged while tyre production was 0 pcs (Possible maintenance or setup shift).",
+            })
+
+    daily_scraps = []
+    for r in rows:
+        sc = (r.get("cal_fab_scrap", 0) or 0) + (r.get("cal_com_scrap", 0) or 0) + (r.get("at_bld_fab_scrap", 0) or 0)
+        if sc > 0:
+            daily_scraps.append((r.get("date"), sc))
+    if daily_scraps:
+        sc_vals = [s[1] for s in daily_scraps]
+        avg_sc = statistics.mean(sc_vals)
+        for d_str, sc in daily_scraps:
+            if sc > avg_sc * 1.8 and sc > 50:
+                anomalies.append({
+                    "date": d_str,
+                    "type": "scrap_spike",
+                    "severity": "warning",
+                    "title": f"Fabric/Compound Scrap Spike ({sc:.1f} kg)",
+                    "detail": f"Scrap was {sc - avg_sc:+.1f} kg above daily average ({avg_sc:.1f} kg).",
+                })
+
+    # 5. Bottlenecks
+    bottlenecks = []
+    if ct_curing > 0 and ct_packed > 0:
+        wip = ct_curing - ct_packed
+        if wip > 5000:
+            bottlenecks.append({
+                "area": "Cycle Tyre Packing Floor",
+                "severity": "medium",
+                "title": f"Cycle Tyre WIP Accumulation ({wip:,} pcs)",
+                "observation": f"Total cured tyres ({ct_curing:,}) exceeded packed tyres ({ct_packed:,}). Unpacked tyres sitting on floor.",
+                "action": "Align packing department shift hours or manpower with curing press velocity.",
+            })
+
+    if at_curing > 0 and at_building > 0:
+        gap = at_curing - at_building
+        if abs(gap) > 1000:
+            bottlenecks.append({
+                "area": "Auto Tyre Building vs Curing Press",
+                "severity": "high" if gap > 0 else "medium",
+                "title": f"Auto Tyre Building/Curing Imbalance ({abs(gap):,} pcs)",
+                "observation": f"Curing ({at_curing:,} pcs) vs Building ({at_building:,} pcs) mismatch by {gap:+,} pcs.",
+                "action": "Audit green tyre buffer stock between building and curing stages.",
+            })
+
+    if compound_buffer_kg < -2000:
+        bottlenecks.append({
+            "area": "Banbury / Mixing Mill Capacity",
+            "severity": "high",
+            "title": f"Theoretical Compound Deficit ({abs(compound_buffer_kg):,.0f} kg)",
+            "observation": f"Theoretical curing demand ({total_theo_compound:,.0f} kg) exceeded mixing output ({mix_final:,.0f} kg).",
+            "action": "Increase masterbatch mixing batches to avoid curing press starvation.",
+        })
+
+    # 6. Management Recommendations
+    recommendations = []
+    ct_growth = mom["cycle_tyre_curing"]["pct"]
+    at_growth = mom["auto_tyre_curing"]["pct"]
+    recommendations.append({
+        "category": "Volume & Throughput Momentum",
+        "badge": "Positive Momentum" if ct_growth >= 0 else "Decline Alert",
+        "badge_color": "emerald" if ct_growth >= 0 else "rose",
+        "headline": f"Tyre Output expanded: Cycle Tyre {ct_growth:+.1f}%, Auto Tyre {at_growth:+.1f}% MoM.",
+        "text": f"Plant achieved total tyre curing of {ct_curing + at_curing:,} pcs in {cur_res.get('month_name')} {year} compared to {p_tot.get('ct_cur_prod_num', 0) + p_tot.get('at_cur_prod_num', 0):,} pcs in {prev_month_str}.",
+    })
+
+    if total_scrap_kg > 0:
+        recommendations.append({
+            "category": "Material Yield & Scrap Minimization",
+            "badge": "Scrap Audit",
+            "badge_color": "amber",
+            "headline": f"Total recorded plant scrap stands at {total_scrap_kg:,.1f} kg ({plant_summaries['mixing']['scrap_rate_pct']:.2f}% of mixing output).",
+            "text": f"Calender Fabric scrap contributed {cal_fab_scrap:,.1f} kg and Compound scrap {cal_com_scrap:,.1f} kg. Implement die edge trim calibration to reduce edge loss.",
+        })
+
+    tot_ot = c_tot.get("total_ot", 0) or 0
+    tot_mp = c_tot.get("total_mp", 0) or 0
+    if tot_mp > 0:
+        ot_per_worker = round(tot_ot / tot_mp, 1)
+        recommendations.append({
+            "category": "Workforce & Overtime Rationalization",
+            "badge": "Manpower Efficiency",
+            "badge_color": "blue",
+            "headline": f"Plant Overtime averaged {ot_per_worker} hours per logged attendee.",
+            "text": f"Total overtime hours reached {tot_ot:,.1f} hrs across {cur_res.get('month_name')}. Ensure overtime shifts correlate directly with high-volume curing runs.",
+        })
+
+    return Response({
+        "status": "success",
+        "month": f"{year}-{month:02d}",
+        "month_name": cur_res.get("month_name"),
+        "year": year,
+        "prev_month": prev_month_str,
+        "mom_comparison": mom,
+        "plant_summaries": plant_summaries,
+        "daily_trends": daily_trends,
+        "anomalies": anomalies,
+        "bottlenecks": bottlenecks,
+        "recommendations": recommendations,
     })
