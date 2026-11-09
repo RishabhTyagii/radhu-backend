@@ -6,4 +6,5 @@ urlpatterns = [
     path("daily-log/", views.save_daily_manual_log, name="plant_performance_save_daily_log"),
     path("summary/", views.monthly_summary_rollup, name="plant_performance_summary"),
     path("analytics/", views.plant_advanced_analytics, name="plant_performance_analytics"),
+    path("intelligence/", views.factory_intelligence_api, name="plant_performance_intelligence"),
 ]

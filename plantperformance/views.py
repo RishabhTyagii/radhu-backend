@@ -809,3 +809,17 @@ def plant_advanced_analytics(request):
         "bottlenecks": bottlenecks,
         "recommendations": recommendations,
     })
+
+
+from .intelligence_service import get_factory_intelligence_data
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def factory_intelligence_api(request):
+    """
+    Complete Factory Intelligence Endpoint across all 8 Workspaces.
+    Strictly read-only via analytics_readonly connection with field-level RBAC.
+    """
+    month_str = request.query_params.get("month")
+    data = get_factory_intelligence_data(month_str=month_str, user=request.user)
+    return Response(data)
